@@ -1,0 +1,3485 @@
+---
+title: "MOFA"
+output: html_document
+date: "2024-11-13"
+---
+
+
+
+
+## Load libraries
+```{r, results = FALSE, message = FALSE, warning = FALSE}
+
+library("ggplot2")
+library("dplyr")
+library("cluster")
+library("factoextra")
+library("hrbrthemes")
+library("mltest")
+library("RColorBrewer")
+library("survival")
+library("MOFA2")
+library("reticulate")
+library("org.Hs.eg.db")
+library("clusterProfiler")
+library("survminer")
+library("ggrepel")
+library("dplyr")
+library("gridExtra")
+library("tidyverse")
+library("corrplot")
+library("patchwork")
+library("pROC")
+library("minfi")
+library("ENmix")
+library("DMRcate")
+library("Hmisc")
+library("pheatmap")
+```
+
+
+```{r}
+setwd("MOFA")
+```
+
+
+## Load functions
+```{r}
+source("../enrichment.R")
+```
+
+```{r}
+
+cor_factors_metadata <- function(factors_matrix, covariates) {
+  
+  if (any(!covariates %in% names(metadata))) stop("Covariate names not in the available metadata.")
+  
+  results_list <- list()
+  
+  for (covariate in covariates) {
+    
+    variable <- metadata[[covariate]]
+    test_results <- matrix(NA, nrow = ncol(factors_matrix), ncol = 2)  
+    rownames(test_results) <- colnames(factors_matrix)
+    colnames(test_results) <- c("Effect Size", "P-value")
+    
+    if (is.numeric(variable)) {  
+      # **Spearman correlation for continuous variables (Age)**
+      for (i in 1:ncol(factors_matrix)) {
+        test <- cor.test(factors_matrix[, i], variable, method = "spearman")
+        test_results[i, ] <- c(test$estimate, test$p.value)
+      }
+      
+    } else if (length(unique(variable)) == 2) {  
+      # **Wilcoxon Rank-Sum Test for binary variables**
+      for (i in 1:ncol(factors_matrix)) {
+        test <- wilcox.test(factors_matrix[, i] ~ variable)
+        test_results[i, ] <- c(NA, test$p.value)  
+      }
+      
+    } else {  
+      # **Kruskal–Wallis Test for multi-class categorical variables**
+      for (i in 1:ncol(factors_matrix)) {
+        test <- kruskal.test(factors_matrix[, i] ~ variable)
+        test_results[i, ] <- c(NA, test$p.value)  
+      }
+    }
+    
+    results_list[[covariate]] <- test_results
+  }
+  
+  return(results_list)  
+}
+
+
+plot_cor <- function(output_cor_factors_metadata) {
+
+ 
+  plot_data <- do.call(rbind, lapply(names(output_cor_factors_metadata), function(var) {
+    df <- as.data.frame(output_cor_factors_metadata[[var]])
+    df$Factor <- rownames(df)
+    df$Covariate <- var
+    df
+  }))
+  
+  plot_data$Covariate <- gsub("Vital_Status", "Vital Status", plot_data$Covariate)
+ 
+  plot_data <- plot_data[, c("Factor", "Covariate", "P-value")]
+  plot_data <- melt(plot_data, id.vars = c("Factor", "Covariate"))
+  
+  
+  plot_data$value <- -log10(plot_data$value)  
+  plot_data$Significance <- cut(plot_data$value,
+                                breaks = c(-Inf, -log10(0.05), -log10(0.01), -log10(0.001), Inf),
+                                labels = c("", "*", "**", "***"))
+  
+  
+
+  plot <- ggplot(plot_data, aes(x = Covariate, y = Factor, fill = value)) +
+    geom_tile() +
+    geom_text(aes(label = Significance), color = "black", size = 6) +  # Significance markers
+    scale_fill_gradient(low = "white", high = "red", name = "-log10(p)") +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    )+
+    labs(x = "", y = "", title = "", )
+  
+  return (plot)
+}
+
+
+
+
+```
+
+```{r}
+
+plot_biplot_mofa <- function(factors_matrix, loadings_matrix, color_by = NULL, shape_by = NULL, show_arrows = FALSE, comps = c(1, 2),
+                        color_legend = NULL, shape_legend = NULL) {
+  
+  df <- data.frame(
+    Comp1 = factors_matrix[, comps[1]],
+    Comp2 = factors_matrix[, comps[2]]
+  )
+  
+  if (!is.null(color_by)) {
+    df$Color <- color_by
+  }
+  
+  if (!is.null(shape_by)) {
+    df$Shape <- shape_by
+  }
+  
+  text_size <- 2
+  
+  # Base plot
+  p <- ggplot(df, aes(x = Comp1, y = Comp2))
+  
+  # Add points conditionally
+  if (!is.null(color_by) & !is.null(shape_by)) {
+    p <- p + geom_point(aes(color = Color, shape = Shape), size = 2, alpha=1) +
+      labs(color = color_legend, shape = shape_legend)
+  } else if (!is.null(color_by)) {
+    p <- p + geom_point(aes(color = Color),  size = 2, alpha=1) +
+      labs(color = color_legend)
+  } else if (!is.null(shape_by)) {
+    p <- p + geom_point(aes(shape = Shape),  size = 2, alpha=1) +
+      labs(shape = shape_legend)
+  } else {
+    p <- p + geom_point(size = 2)
+  }
+  
+  # Add theme and labels
+  p <- p +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) +
+    labs(
+      x = paste0("Factor ", comps[1]),
+      y = paste0("Factor ", comps[2])
+    )
+  
+  if (!is.null(color_by)) {
+    if (is.numeric(color_by)) {
+      p <- p + scale_color_gradientn(
+        colours = c("darkgreen", "white", "darkred"),
+        name = color_legend
+      )
+    } 
+  }
+  
+  # Add arrows for loadings if requested
+  if (show_arrows) {
+    load_df <- data.frame(
+      xend = loadings_matrix[, comps[1]],
+      yend = loadings_matrix[, comps[2]],
+      name = rownames(loadings_matrix)
+    )
+    
+    p <- p + 
+      geom_segment(data = load_df, aes(x = 0, y = 0, xend = xend, yend = yend),
+                   arrow = arrow(length = unit(0.2, "cm")), 
+                   color = "black", 
+                   inherit.aes = FALSE) +
+      geom_text(
+        data = load_df,
+        aes(x = xend, y = yend, label = name),
+        hjust = 0.5, vjust = -0.7, size = 3
+      ) 
+  }
+  
+  return(p)
+}
+```
+
+## Load data
+```{r}
+
+metadata <- read.csv("../DataSets/2_analysis/metadata.csv", row.names = 1)
+
+survival <- read.csv("../DataSets/2_analysis/survival_data.csv", row.names = 1)
+
+mutations <- read.csv("../DataSets/2_analysis/mutations.csv", row.names = 1)
+dna <- read.csv("../DataSets/2_analysis/dna.csv", row.names = 1)
+mrna <- read.csv("../DataSets/2_analysis/mrna.csv", row.names = 1)
+mirna <- read.csv("../DataSets/2_analysis/mirna.csv", row.names = 1)
+
+
+info.methy <- read.csv("../DataSets/processed_assays/info_methylation.csv", row.names = 1)
+info.mirna <- read.csv("../DataSets/processed_assays/info_rna_mirna.csv", row.names = 1)
+info.mrna <- read.csv("../DataSets/processed_assays/info_rna_coding.csv", row.names = 1)
+```
+
+
+```{r}
+omics.list <- list(Mutations = mutations, Methylation = dna, mRNA = mrna, miRNA = mirna)
+```
+
+
+  
+
+```{r}
+text_size <- 2
+```
+  
+  
+
+## Method
+
+# MOFA (Multi-Omics Factor Analysis)
+```{r}
+
+run_MOFA <- function(X, n_runs = 25, num_factors = NULL, likelihoods = NULL, metadata = NULL){
+
+  time_taken <- system.time({
+    
+    seeds <- seq(1, n_runs)
+    mofa_models <- list()
+      
+    for (seed in 1: length(seeds)){
+  
+      mofa <- create_mofa(lapply(X, t))
+      
+      data_options <- get_default_data_options(mofa)
+      
+      model_options <- get_default_model_options(mofa) 
+      model_options$spikeslab_weights <- TRUE # (default)
+      model_options$ard_weights <- TRUE # (default)
+      if (is.null(likelihoods) == FALSE){
+        model_options$likelihoods <- likelihoods
+      }
+
+      training_options <- get_default_training_options(mofa)
+      training_options$seed <- seed
+      training_options$convergence_mode <- "medium" # 0.00005% deltaELBO change
+  
+      if (is.null(num_factors) == FALSE){
+        model_options$num_factors <- num_factors
+      }
+      else {
+        training_options$drop_factor_threshold <- 0.05 # factors explaining less than 5% will be dropped
+      }
+    
+      mofa <- prepare_mofa(
+        mofa, 
+        data_options = data_options, 
+        model_options =  model_options, 
+        training_options = training_options)
+    
+      use_condaenv("mofa_env", required = TRUE)
+      mofa <- run_mofa(mofa, use_basilisk = FALSE)
+      
+      mofa_models <- append(mofa_models, mofa)
+    }
+    
+    mofa <- select_model(mofa_models, plot = FALSE)
+    mofa_index <- which(sapply(mofa_models, identical, mofa))
+    
+    
+    # # plot of the ELBO of each instance model
+    # elbo_per_model <- compare_elbo(mofa_models, log = FALSE)
+    # df <- elbo_per_model$data
+    # df$selected <- ifelse(seq_len(nrow(df)) == mofa_index, "Selected", "Other")
+    # p1 <- ggplot(data = df, mapping = aes(x = model, y = ELBO,  fill = selected)) +
+    #   geom_col() +
+    #   scale_fill_manual(values = c("Selected" = brewer.pal(n = 2, name = "Oranges")[2], "Other" = brewer.pal(n = 2, name = "Oranges")[1])) +
+    #   labs(x = NULL, y = "Evidence Lower Bound (ELBO)") +
+    #   theme_minimal() +
+    #   theme(panel.grid = element_blank(), legend.position = "none")
+    # print(p1)
+    # 
+    # # plot of the total variance explained of each model instance
+    # var_vec <- c()
+    # for (model in mofa_models){
+    #   var <- plot_variance_explained(model, plot_total = T)[[2]]
+    #   var_vec <- append(var_vec, sum(var$data$R2)/nrow(var$data))
+    # }
+    # var_per_model <- data.frame(models = df$model, variance = var_vec, selected = df$selected)
+    # 
+    # p2 <- ggplot(data = var_per_model, mapping = aes(x = models, y = variance,  fill = selected)) +
+    #   geom_col() +
+    #   scale_fill_manual(values = c("Selected" = brewer.pal(n = 2, name = "Oranges")[2], "Other" = brewer.pal(n = 2, name = "Oranges")[1])) +
+    #   labs(x = NULL, y = "Total Variance explained (%)") +
+    #   theme_minimal() +
+    #   theme(panel.grid = element_blank(), legend.position = "none")
+    # print(p2)
+    
+    
+    if (is.null(metadata) == FALSE){
+      metadata_2_df <- cbind(mofa@samples_metadata, as.data.frame(metadata[mofa@samples_metadata$sample, ]))
+      samples_metadata(mofa) <- metadata_2_df 
+    }
+    
+   
+    
+    loadings <- get_weights(mofa)
+    loadings <- lapply(loadings, function(mat) {
+        mat <- as.matrix(mat)  
+        colnames(mat) <- str_replace_all(colnames(mat), "Factor", "Factor ")
+        return(mat)  
+    })
+    
+    
+    factors <- get_factors(mofa)[[1]]
+    colnames(factors) <- gsub("Factor", "Factor ", colnames(factors))
+    
+    result <- list(Z = factors, W = loadings, model_output = mofa, metadata = metadata_2_df)
+  })
+  
+  result$time_taken <- time_taken["elapsed"]
+  return (result)
+}
+```
+
+
+
+
+
+
+
+## Evaluation
+
+
+# Choose the quantile q
+
+
+
+```{r}
+
+select_perc_top <- function(q, sign, vec){
+  if (sign == "positive"){
+    vec <- vec[vec > 0]
+    q <- quantile(vec, 1-q)[[1]]
+    vec_top <- vec[vec > q]
+  }
+  else {
+    vec <- vec[vec < 0]
+    q <- quantile(vec, q)[[1]]
+    vec_top <- vec[vec < q]
+  }
+  sig <- names(vec_top)
+  
+  return(sig)
+}
+```
+
+
+
+
+# Subtype Identification
+
+```{r}
+
+plot_elbow_silh <- function (factors_idxs, factors_mofa){
+  
+  Ks <- sapply(2: 10,  function(i) summary(silhouette(pam(factors_mofa[, factors_idxs], k = i)))$avg.width)
+  data <- data.frame(NumbCluster = seq(2, 10), AvgSilh = Ks)
+  plot1 <- data %>%
+    ggplot(aes(x = NumbCluster, y = AvgSilh)) +
+      geom_line() +
+      geom_point(shape = 21, fill = "#69b3a2", size = 1) +
+       theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+       legend.title = element_text(size = rel(text_size), color = 'black'),
+     panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) +
+      labs(title = paste0("Using the factors ", factors_idxs[1], " and ", factors_idxs[2]) , x = "Number of Clusters", y = "Average Silhouette Score" )
+  
+  tot_withinss <- map_dbl(2: 10,  function(k){
+    model <- kmeans(x = factors_mofa[, factors_idxs], centers = k)
+    model$tot.withinss
+  })
+  elbow_df <- data.frame(k = 2: 10, tot_withinss = tot_withinss)
+  plot2 <- ggplot(elbow_df, aes(x = k, y = tot_withinss)) +
+    geom_line() +
+    scale_x_continuous(breaks = 2: 10) + 
+    geom_point(shape = 21, fill = "#69b3a2", size = 1) +
+     theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+       legend.title = element_text(size = rel(text_size), color = 'black'),
+     panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) +
+    labs(title = paste0("Using the factors ", factors_idxs[1], " and ", factors_idxs[2]) , x = "Number of Clusters", y = "Total within-cluster sum of squares")
+    
+  
+  grid.arrange(plot1, plot2, ncol = 2)
+  
+  
+}
+
+```
+
+
+```{r}
+
+plot_scatter_factors <- function(factors_idxs, run_mofa_output, k, class = TRUE ){
+  
+  kmeans_out <- kmeans(x = run_mofa_output$Z[, factors_idxs], centers = k)
+  
+  cluster_assignments <- as.factor(kmeans_out$cluster)
+  centers <- kmeans_out$centers
+  
+  df <- data.frame(
+    Factor1 = run_mofa_output$Z[, factors_idxs[1]], 
+    Factor2 = run_mofa_output$Z[, factors_idxs[2]],
+    clusters = cluster_assignments
+  )
+  
+  if (class == TRUE){
+    df$labels <- run_mofa_output$metadata$classification.2021
+    }
+  else{
+    df$labels <- run_mofa_output$metadata$classification.2021.type
+  }
+  
+  ggplot(data = df, aes(x = Factor1, y = Factor2, colour = labels, shape = clusters)) +
+    geom_point() +
+     theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+     panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) + 
+    labs(x = colnames(run_mofa_output$Z)[factors_idxs[1]], 
+         y = colnames(run_mofa_output$Z)[factors_idxs[2]], 
+         title = paste0("Scatter plot of Factors ", factors_idxs[1], " and ", factors_idxs[2])) 
+
+}
+```
+
+
+```{r}
+plot_roc_auc <- function(factors_matrix, metadata, class_column) {
+
+  
+
+  real_classes <- as.factor(metadata[[class_column]])
+  unique_classes <- levels(real_classes)
+  num_components <- ncol(factors_matrix)
+  
+
+  auc_results <- data.frame(
+    Component = numeric(),
+    Class = character(),
+    AUC = numeric()
+  )
+  
+
+  for (comp in seq_len(num_components)) {
+    for (class in unique_classes) {
+
+      binary_labels <- ifelse(real_classes == class, 1, 0)
+      
+
+      roc_obj <- roc(binary_labels, factors_matrix[, comp], quiet = TRUE)
+      auc_value <- auc(roc_obj)
+      
+
+      auc_results <- rbind(
+        auc_results,
+        data.frame(Component = paste0("Factor ", comp), Subtype = class, AUC = auc_value)
+      )
+    }
+  }
+  
+
+  ggplot(auc_results, aes(x = Component, y = AUC, fill = Subtype)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = "",
+         x = "", y = "AUC",
+         fill = "Subtype") +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+     panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+
+```
+
+# Survival Analysis
+
+  -> Association between factors matrix and survival, fit cox regression model and the respective plot
+
+It outputs multiple things, the most important can be seen with summary(fit):
+  . exp(coef): the hazard ratio
+  . exp(-coef): the inverse of the hazard ratio
+  . coef: is this estimated coefficient
+  . se(coef): estimated standard error
+  . lower .95 and upper .95: are the 95%-confidence interval for the estimated hazard ratio exp(coef)
+  . Pr(>|z|): p-value associated with the Wald test statistic  for the null hypothesis that the coef is zero
+  . Concordance:  a measure of how well the model predicts the ordering of survival times (0.5: random predictions, > 0.6: indicates a useful mode)
+  . Likelihood Ratio test: Compares the likelihood of the data under the null model (no predictors) to the likelihood of the data under the fitted model (with predictors)
+  . Score (logrank) test: test of the null hypothesis that there is no association between the predictor (groupslow, in this case) and survival times, based on ranks of survival times
+
+```{r}
+
+plot_survival_factors <- function (survival, factors_matrix){
+  
+  survival[is.na(survival)] <- 0
+  surv_object <- Surv(time = survival[rownames(factors_matrix), "Time"], event = survival[rownames(factors_matrix), "Status"] )
+
+  fit <- coxph(surv_object ~ factors_matrix) 
+  
+  s <- summary(fit)
+  coef <- s[["coefficients"]]
+
+  df <- data.frame(
+    factor = factor(rownames(coef), levels = rev(rownames(coef))),
+    p      = coef[,"Pr(>|z|)"], 
+    coef   = coef[,"exp(coef)"], 
+    lower  = s[["conf.int"]][,"lower .95"], 
+    higher = s[["conf.int"]][,"upper .95"])
+  
+  df$significant <- ifelse(df$p < 0.05, "*", "")
+
+  p <- ggplot(df, aes(x = factor, y = coef, ymin = lower, ymax = higher)) +
+    geom_pointrange() + 
+    geom_text(aes(label = significant, x = higher + 3.5), color = "black", size = 5) +
+    labs(y="Hazard Ratio", x="") + 
+    scale_x_discrete(labels = paste0("Factor ", seq(ncol(factors_matrix),1))) + 
+    geom_hline(aes(yintercept=1), linetype="dotted") +
+    coord_flip() +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+  
+  print(p)
+    
+  return(list(p, fit))
+}
+```
+
+
+
+
+-> Kaplan-Meier com a separação por High/ Low using the expression of a feature or factor (then using the function ggsurvplot, see https://www.sthda.com/english/wiki/survminer-r-package-survival-data-analysis-and-visualization) 
+NOTE: It automatically delete the observations due to missingness (in terms of survival data)
+It outputs multiple things, the most important can be seen with summary(fit):
+  . time
+  . n.risk: number of persons at risk in that interval 
+  . n.event: the number of deaths that occurred in that interval 
+  . survival: survival probability
+  . st.err: the standard error of the survival value
+  . lower 95% CI upper 95% CI: level of confidence for the confidence intervals of survival
+
+
+```{r}
+plot_kaplan_meier <- function(survival, run_mofa_output, listF) {
+  
+  survival[is.na(survival)] <- 0
+  surv_object <- Surv(time = survival[rownames(run_mofa_output$Z), "survival"], event = survival[rownames(run_mofa_output$Z), "death"])
+  
+  features_metadata <- run_mofa_output$model_output@features_metadata
+  
+  for (k in listF) {
+    
+    if (is.character(k)) { # Feature
+      
+      view_name <- features_metadata$view[features_metadata$feature == k]
+      feature_data <- run_mofa_output$model_output@data[[view_name]]$group1[k,]
+      
+      
+      df <- data.frame(time = survival[rownames(run_mofa_output$Z), "survival"], event = survival[rownames(run_mofa_output$Z), "death"], feature = feature_data)
+      cutpoint <- median(df$feature, na.rm = TRUE)
+      df$FeatureCluster <- df$feature > cutpoint
+  
+      
+
+      fit <- survfit(Surv(time, event) ~ FeatureCluster, data = df)
+
+      p <- ggsurvplot(
+        fit, data = df, conf.int = TRUE, pval = TRUE,
+        fun = function(y) y * 100,
+        legend = "top",
+        legend.labs = c(paste0("Low ", k), paste0("High ", k)),
+        xlab = "Time", ylab = "Survival Probability (%)",
+        title = paste0("Feature ", k))$plot
+
+      print(p)
+      
+    } 
+    else if (is.numeric(k)) {  # Factor
+      df <- data.frame(
+        time = survival[rownames(run_mofa_output$Z), "survival"],
+        event = survival[rownames(run_mofa_output$Z), "death"],
+        factor = run_mofa_output$Z[, k]
+      )
+      cut <- surv_cutpoint(df, variables = "factor")
+      df$FactorCluster <- df$factor > cut$cutpoint$cutpoint
+      
+      fit <- survfit(Surv(time, event) ~ FactorCluster, data = df)
+      
+      p <- ggsurvplot(
+        fit, data = df, conf.int = TRUE, pval = TRUE,
+        fun = function(y) y * 100,
+        legend = "top",
+        legend.labs = c(paste0("Low Factor ", k), paste0("High Factor ", k)),
+        xlab = "Time", ylab = "Survival Probability (%)",
+        title = paste0("Factor ", k)
+      )$plot
+      
+      print(p)
+    }
+  }
+  
+  return (q)
+}
+```
+
+
+
+
+
+
+
+
+
+
+# BEFORE -- attempt of a more restrict CpGs annotation
+
+```{r}
+library("annotatr")
+library("GenomicRanges")
+library("TxDb.Hsapiens.UCSC.hg38.knownGene")
+grep("^hg38",  builtin_annotations(), value = TRUE)
+
+```
+
+Build the CpG and Genic Annotations
+```{r}
+# classify regions based on their relationship to CpG sites
+cpg_annotations <- c("hg38_cpgs") # CpG islands, CpG shores, CpG shelves, inter-CGI
+                 
+# describe the location within or near genes
+genic_annotations <- c("hg38_basicgenes") # 1-5Kb, promoters, 5’UTRs -- promoters and  exons, introns (non coding), 3’UTRs -- gene body
+
+cpg_annots <- build_annotations(genome = "hg38", annotations = cpg_annotations)
+genic_annots <- build_annotations(genome = "hg38", annotations = genic_annotations)
+```
+
+For the plot
+```{r}
+library("pheatmap")
+
+annot_colors <- list(CpG = c("CpG islands" = "black" , 
+                           "CpG shores" = "grey", 
+                           "inter CGI" = "white"),
+                  Genic = c("promoters" = brewer.pal(n = 7, name = "Set3")[1],
+                            "1-5Kb" = brewer.pal(n = 7, name = "Set3")[2],
+                            "5'UTR" = brewer.pal(n = 7, name = "Set3")[3],
+                            "exons" = brewer.pal(n = 7, name = "Set3")[4],
+                            "introns" = brewer.pal(n = 7, name = "Set3")[5],
+                            "3'UTRs" = brewer.pal(n = 7, name = "Set3")[6],
+                            "missing" =  brewer.pal(n = 7, name = "Set3")[7]))
+```
+
+
+```{r}
+
+plot_annotation_methy <- function(cgs, info_methy, cpg_annots, genic_annots, annot_colors = NULL, plot = FALSE){
+  
+  if (class(cgs) == "list"){
+    cgs <- as.vector(cgs)
+  }
+  
+  my_cp_sites <- GRanges(seqnames = info_methy[cgs, "chrm_A"],
+                        ranges = IRanges(start = as.numeric(info_methy[cgs, "probeBeg"]), 
+                                         end = as.numeric(info.methy[cgs, "probeEnd"])),
+                        strand = "*",
+                        CpG = cgs)
+  
+  cpg_annot_results <- annotate_regions(regions = my_cp_sites, annotations = cpg_annots, ignore.strand = TRUE)
+  genic_annot_results <- annotate_regions(regions = my_cp_sites, annotations = genic_annots, ignore.strand = TRUE)
+  
+  cpg_annot_df <- as.data.frame(cpg_annot_results)
+  genic_annot_df <- as.data.frame(genic_annot_results)
+
+  if (plot == TRUE){
+    
+    if (is.null(annot_colors)) {
+      stop("Please provide annot_colors when plot=TRUE.")
+    }
+    
+    else{
+      genes <- as.vector(unique(genic_annot_results$annot$symbol))
+      genes <- genes[!is.na(genes)]
+    
+      count_matrix <- matrix(data = 0, nrow = length(cgs), ncol = length(genes), dimnames = list(cgs, genes))
+    
+      for (cg in cgs){
+        result <- table(genic_annot_df[genic_annot_df$CpG == cg, "annot.symbol"])
+        count_matrix[cg, names(result)] <- as.vector(result)
+      }
+      
+      cpg_loc_annot <- c()
+      for (cg in cgs){
+        result <- table(cpg_annot_df[cpg_annot_df$CpG == cg, "annot.type"])
+        max_annot_type <- names(result)[which.max(result)]
+        cpg_loc_annot <- c(cpg_loc_annot, max_annot_type)
+      }
+    
+      genic_loc_annot <- c()
+      for (cg in cgs){
+        if (!cg %in% genic_annot_df$CpG){
+          genic_loc_annot <- c(genic_loc_annot, "missing")
+        }
+        result <- table(genic_annot_df[genic_annot_df$CpG == cg, "annot.type"])
+        max_annot_type <- names(result)[which.max(result)]
+        genic_loc_annot <- c(genic_loc_annot, max_annot_type)
+      }
+    
+    
+      cpg_loc_annot[cpg_loc_annot == "hg38_cpg_islands"] <- "CpG islands"
+      cpg_loc_annot[cpg_loc_annot == "hg38_cpg_shores"] <- "CpG shores"
+      cpg_loc_annot[cpg_loc_annot == "hg38_cpg_inter"] <- "inter CGI"
+      
+      genic_loc_annot[genic_loc_annot== "hg38_genes_promoters"] <- "promoters"
+      genic_loc_annot[genic_loc_annot == "hg38_genes_1to5kb" ] <- "1-5Kb"
+      genic_loc_annot[genic_loc_annot == "hg38_genes_5UTRs"] <- "5'UTR"
+      genic_loc_annot[genic_loc_annot == "hg38_genes_exons"] <- "exons"
+      genic_loc_annot[genic_loc_annot == "hg38_genes_introns"] <- "introns"
+      genic_loc_annot[genic_loc_annot == "hg38_genes_3UTRs"] <- "3'UTRs"
+    
+    
+      cg_annotation_complete <- data.frame(CpG = cpg_loc_annot, Genic = genic_loc_annot)
+      rownames(cg_annotation_complete) <- cgs
+    
+      p <- pheatmap(count_matrix,
+        cluster_rows = FALSE,
+        cluster_cols = FALSE,
+        display_numbers = FALSE,
+        color = colorRampPalette(c("white", "red"))(50),
+        annotation_row = cg_annotation_complete,
+        annotation_colors = annot_colors,
+        main = "CpG-Gene Relationships with Genic and CpG Annotation"
+      )
+    }
+  }
+
+
+  return (list(CpG_Annotation = cpg_annot_df, Genic_Annotation = genic_annot_df))
+}
+```
+
+
+# END -- attempt of a more restrict CpGs annotation
+
+
+
+
+
+
+## Run the model
+
+```{r}
+out_mofa <- run_MOFA(omics.list, n_runs = 10, num_factors = NULL, 
+                 likelihoods = c( "bernoulli", "gaussian", "gaussian", "gaussian"), metadata = metadata)
+```
+
+<!-- > out_mofa$time_taken -->
+<!--  elapsed  -->
+<!-- 2023.572 -->
+
+```{r}
+model_mofa <- out_mofa$model_output 
+```
+
+```{r}
+factors_mofa <- out_mofa$Z
+loadings_mofa <- out_mofa$W
+```
+
+```{r}
+
+write.csv(factors_mofa, "output/factors_mofa.csv", row.names = TRUE)
+
+write.csv(loadings_mofa$Mutations, "output/loadings_mofa_mut.csv", row.names = TRUE)
+write.csv(loadings_mofa$Methylation, "output/loadings_mofa_dna.csv", row.names = TRUE)
+write.csv(loadings_mofa$mRNA, "output/loadings_mofa_mrna.csv", row.names = TRUE)
+write.csv(loadings_mofa$miRNA, "output/loadings_mofa_mirna.csv", row.names = TRUE)
+
+```
+
+
+```{r}
+factors_mofa <- as.matrix(read.csv("output/factors_mofa.csv", row.names = 1))
+
+loadings_mofa <- list(
+  Mutations = as.matrix(read.csv("output/loadings_mofa_mut.csv", row.names = 1)),
+  Methylation = as.matrix(read.csv("output/loadings_mofa_dna.csv", row.names = 1)),
+  mRNA = as.matrix(read.csv("output/loadings_mofa_mrna.csv", row.names = 1)),
+  miRNA = as.matrix(read.csv("output/loadings_mofa_mirna.csv", row.names = 1))
+)
+```
+
+
+## Explore the output
+
+```{r}
+out_mofa$time_taken
+```
+ 1919.714 time
+
+
+
+# Explore Model 
+
+
+---> Correlation between factors 
+
+```{r}
+
+plot_factor_cor(model_mofa)
+```
+
+In MOFA there are no orthogonality constraints such as in PCA, but if there is a lot of correlation between Factors this suggests a poor model fit.
+In the model fitted it seem everything okay.
+
+
+---> Variance decomposition by Factor/Total variance explained per view
+
+```{r}
+
+plot_variance_explained(model_mofa, plot_total = T)[[1]]
+plot_variance_explained(model_mofa, plot_total = T)[[2]]
+```
+For a  better interpretation:
+```{r}
+
+plot_variance_explained_global <- function(mofa_model){
+  
+  text_size <-2
+
+  factor_vieww <- plot_variance_explained(mofa_model, plot_total = T)[[1]]
+  
+  view <- plot_variance_explained(mofa_model, plot_total = T)[[2]]
+
+
+  # corr plot
+  factor_view <- factor_vieww$data
+  factor_view$factor <- sub("Factor(\\d+)", "Factor \\1", factor_view$factor)
+  view_R2 <- view$data[, c("view", "R2")]
+  factor_view <- merge(factor_view, view_R2, by = "view")
+  
+  factor_view_label <- factor_view %>%
+    arrange(view, R2) %>%
+    group_by(view) %>%
+    filter(row_number() == 1) %>%
+    mutate(R2 = paste0(round(R2, 2), "%"))
+  
+  p1 <- ggplot(factor_view, aes(x=view, y=factor)) + 
+      geom_tile(aes(fill = .data$value), color="black") +
+      labs(x="", y="", title="") +
+      guides(fill = guide_colorbar("Var. (%)")) +
+      geom_text(data = factor_view_label, aes(label = R2), 
+              position = position_nudge(y = 3.55),   
+              size = 5, color = "black") +
+      scale_fill_gradient(low = "white", high =  brewer.pal(n = 3, name = "Oranges")[3]) +
+        theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+       legend.title = element_text(size = rel(text_size), color = 'black'),
+     panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+
+
+  factor_total_variance <- aggregate(value ~ factor, data = factor_vieww$data, FUN = function(x) sum(x, na.rm = TRUE))
+ 
+  
+  factor_total_variance <- as.data.frame(factor_total_variance)
+  factor_total_variance$factor <- sub("Factor(\\d+)", "Factor \\1", factor_total_variance$factor)
+  
+  p2 <- ggplot(factor_total_variance, aes(x = factor, y= value)) + 
+    geom_bar(stat="identity", fill = brewer.pal(n = 3, name = "Oranges")[3], width = 0.8, position = position_dodge(width = 0.5)) +
+    xlab("") + 
+    ylab("Total Variance explained (%)")+
+    geom_hline(yintercept = 10, color = brewer.pal(n = 3, name = "Oranges")[2], linetype = "dashed")+
+    
+      theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+       legend.title = element_text(size = rel(text_size), color = 'black'),
+     panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) +
+    coord_flip() 
+ 
+  return (p1 + p2 + plot_layout(widths = c(1.9, 1.6)))
+}
+
+```
+
+
+
+```{r}
+p <- plot_variance_explained_global(model_mofa)
+p
+ggsave(filename = "results/variance.png", plot = p, width = 14, height = 8)
+
+rm(p)
+```
+
+- Factor 1: capturing some co-variation between the mRNA, the DNA methylation assay, the Mutations assay (the model explains 20% of this assay and this factor is explaining 15% of that) and the miRNA (the model explains 5% of this assay and this factor is explaining 3% of that).
+
+- Factor 2: captures a significant variance of the mRNA assay
+
+- Factor 3: captures a significant co-variance of the mRNA assay, the mutations assay (explains 3% out of 20%) and the DNAMethylation assay (3%)
+
+- Factor 4: captures a significant variance of the DNAMethylation assay
+  
+  
+Factor 1 and factor 3  captures a source of variability that is present across almost all data modalities. Thus, its etiology is likely to be something very important for the disease.
+
+  
+  
+MOFA is a linear and sparse model. This is helpful to prevent overfitting, but it will never explain 100% of the variance, even if using a lot of factors. In this model, we have (only) 5 factors and it explains up to ~37% of the variation in the mRNA assay and ~63% of the variation in the DNA methylation assay, which I guess is good for a linear model.
+
+
+
+
+
+
+---> Characterization of Factors
+
+
+```{r}
+cor_mofa <- cor_factors_metadata(factors_mofa, c("Age", "Gender", "Vital_Status", "Type", "Subtype"))
+```
+```{r}
+p <- plot_cor(cor_mofa)
+ggsave(filename = "results/cor.pdf", plot = p, width = 8, height = 6)
+p
+rm(p)
+```
+
+```{r}
+p <- plot_survival_factors(survival, factors_mofa)
+
+ggsave(filename = "results/factors_hazard.pdf", plot = p[[1]], width = 10, height = 7, dpi = 300)
+```
+
+
+Factor 1: positively correlated with the type of cancer (GBM VS LGG)
+          negatively correlated with vital status and age
+
+Factor 3: the same as factor 1 but "weaker" and shows a slightly negative correlation with the class
+
+Factor 4: extremely  negatively correlated with gender
+
+
+Factor 1 and Factor 3 seems interesting to explore more. Factor 4, taking into account that is just explaining variation in the DNA Methylation assay and extremely correlated with gender, maybe is just distinguishing the genders by the sexual chromosomes. 
+
+
+To confirm the suspicious above
+```{r}
+
+# Factor 1
+plot_factor(model_mofa, factors = 1, color_by = "Type", scale = TRUE, dot_size = 3, dodge = TRUE, add_violin = TRUE, show_missing = FALSE)
+plot_factor(model_mofa, factors = 1, color_by = "Vital_Status", scale = TRUE, dot_size = 3, dodge = TRUE, add_violin  = TRUE, show_missing = FALSE)
+plot_factor(model_mofa, factors = 1, color_by = "Age", scale = TRUE, dot_size = 3, show_missing = FALSE)
+
+# Factor 3
+plot_factor(model_mofa, factors = 3, color_by = "Type", scale = TRUE, dot_size = 3, dodge = TRUE, add_violin = TRUE, show_missing = FALSE)
+plot_factor(model_mofa, factors = 3, color_by = "Vital_Status", scale = TRUE, dot_size = 3, dodge = TRUE, add_violin  = TRUE, show_missing = FALSE)
+plot_factor(model_mofa, factors = 3, color_by = "Subtype", scale = TRUE, dot_size = 3, dodge = TRUE, add_violin  = TRUE, show_missing = FALSE)
+plot_factor(model_mofa, factors = 3, color_by = "Age", scale = TRUE, dot_size = 3, show_missing = FALSE)
+
+
+
+# Factor 4
+plot_factor(model_mofa, factors = 4, color_by = "Gender", scale = TRUE, dot_size = 3, dodge = TRUE, add_violin  = TRUE, show_missing = FALSE)
+
+```
+
+
+Is there any correlated with the class of cancer?
+```{r}
+
+plot_factor(model_mofa, factors = "all", color_by = "Type", scale = TRUE, dot_size = 2, dodge = TRUE, add_boxplot = TRUE, show_missing = FALSE)
+plot_factor(model_mofa, factors = "all", color_by = "Type", scale = TRUE, dot_size = 2, dodge = TRUE, add_violin = TRUE, show_missing = FALSE)
+```
+
+```{r}
+text_size <- 2
+
+p <- plot_factors(model_mofa, 
+  factors = c(1,3), 
+  dot_size = 2.5,
+  color_by = "Subtype",
+  show_missing = T,
+  scale = F
+)
+
+p <- p + 
+  geom_vline(xintercept=0, linetype="dashed") + 
+  geom_segment(aes(x = 0, xend = Inf, y = 0, yend = 0), linetype = "dashed") +
+  theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+       legend.title = element_text(size = rel(text_size), color = 'black'),
+     panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) +
+  labs(x = "Factor 1", y = "Factor 3")
+
+print(p)
+
+ggsave(filename = "results/f1_f3.pdf", p,  width = 6, height = 4)
+```
+
+
+```{r}
+sample_df <- data.frame(Factor1 = numeric(318),
+                        Factor3 = numeric(318),
+                        Factor2 = numeric(318),
+                        Subtype = rep("GBM", 318))
+sample_df$Factor1 <- factors_mofa[,1]
+sample_df$Factor3 <- factors_mofa[,3]
+sample_df$Factor2 <- factors_mofa[,2]
+sample_df$Subtype <- metadata$Subtype
+
+library(ggplot2)
+p <- ggplot(sample_df, aes(x = Factor1, y = Factor3)) +
+  geom_point(aes(color = Factor2, shape = Subtype), size = 2.5) +
+   geom_vline(xintercept=0, linetype="dashed") + 
+  geom_segment(aes(x = 0, xend = Inf, y = 0, yend = 0), linetype = "dashed") +
+  scale_color_gradientn(
+  colours = c("darkgreen", "white", "darkred"),
+  name = "Factor 2"
+) +
+  theme(
+    axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+    axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+    axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+    axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+    legend.text = element_text(size = rel(text_size), color = 'black'),
+    legend.title = element_text(size = rel(text_size), color = 'black'),
+    panel.grid.minor = element_blank(), 
+    panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+    panel.background = element_blank()
+  ) +
+  labs(x = "Factor 1", y = "Factor 3", shape = "Subtype")
+
+ggsave(filename = "results/f1_f3_f2.pdf", p,  width = 6, height = 4)
+
+p
+
+```
+
+
+
+  -->> Inspection of factor values
+  
+To see the sparsity on the factors (Beeswarm plot of the latent factor values)
+The legend are the not scaled values.
+```{r}
+
+for (i in 1: ncol(factors_mofa)){
+  print(plot_factor(model_mofa, factors = i, color_by = paste0("Factor",i), scale = TRUE, dot_size = 3))
+}
+```
+
+
+  
+  -->> Inspection of the feature weights
+
+VISUALISING IN MUTATIONS (variance just represented in factor 1 and 3)
+```{r}
+for (factor in c(1,3)){
+  print(plot_top_weights(model_mofa,
+   view = "Mutations",
+   factor = factor,
+   nfeatures = 30,     
+   scale = T           
+  ))
+}
+
+for (factor in c(1,3)){
+  print(plot_top_weights(model_mofa,
+   view = "Mutations",
+   factor = factor,
+   nfeatures = 30,     
+   scale = T,
+   sign = "positive"
+  ))
+}
+
+for (factor in c(1,3)){
+  print(plot_top_weights(model_mofa,
+   view = "Mutations",
+   factor = factor,
+   nfeatures = 30,     
+   scale = T,
+   sign = "negative"
+  ))
+}
+
+
+
+```
+FACTOR 1: 
+- Selects IDH1 (+) 
+- Selects PTEN(-), EGFR(-) (ALL  SAMPLES with the mutations PTEN and EGFR have this factor negative)
+```{r}
+plot_factor(model_mofa, 
+  factors = 1, 
+  color_by = "PTEN",
+  add_boxplot = TRUE,
+  dodge = TRUE,
+  dot_size = 3
+)
+plot_factor(model_mofa, 
+  factors = 1, 
+  color_by = "EGFR",
+  add_boxplot = TRUE,
+  dodge = TRUE,
+  dot_size = 3
+)
+
+plot_factor(model_mofa, 
+  factors = 1, 
+  color_by = "IDH1",
+  add_boxplot = TRUE,
+  dodge = TRUE,
+  dot_size = 3
+)
+```
+Basically, it seems to me that factor 1 is distinguishing the LGG patients (for positive values)  from the GBM patients (for negative values). The association with the vital status and age corroborates).
+
+```{r}
+mutations_sel_f1_pos <- c("IDH1")
+mutations_sel_f1_neg <- c("PTEN", "EGFR")
+```
+
+
+FACTOR 3: 
+- Selects IDH1 (+), TP53(+), ATRX (+) 
+- Selects CIC (-), 
+```{r}
+#out1$W$Mutations["IDH1", "Factor3"]
+plot_factor(model_mofa, 
+  factors = 3, 
+  color_by = "TP53",
+  add_boxplot = TRUE,
+  dodge = TRUE,
+  dot_size = 3, 
+  scale = T
+)
+```
+Basically, it seems to me that factor 3 is distinguishing the Astrocytoma patients (for positive values) from the Oligodendroglioma patients (for negative values). The association with the vital status and age corroborates).
+
+
+```{r}
+mutations_sel_f3_pos <- c("TP53", "ATRX")
+mutations_sel_f3_neg <- c("CIC")
+```
+
+```{r}
+p <- plot_factors(model_mofa, 
+  factors = c(1,3), 
+  color_by = "PTEN",
+  shape_by = "IDH1",
+  show_missing = T,
+  scale = T
+)
+
+p <- p + 
+  geom_vline(xintercept=0, linetype="dashed") + 
+  geom_segment(aes(x = 0, xend = max(p$data$x), y = 0, yend = 0), linetype = "dashed")+
+  theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+       legend.title = element_text(size = rel(text_size), color = 'black'),
+     panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) +
+  labs(x = "Factor 1", y = "Factor 3")
+
+print(p)
+ggsave(filename = "results/pten.pdf", p, width = 7, height = 4)
+
+```
+
+
+
+```{r}
+library(scatterplot3d)
+scatterplot3d(factors_mofa[,1], factors_mofa[,2], factors_mofa[,3], color = colors[metadata$Subtype], pch = 19)
+
+colors <- c("GBM" = "blue", "ASTRO" = "red", "OLIGO" = "green")
+
+library(plotly)
+
+plot_ly(x = ~factors_mofa[,1], y = ~factors_mofa[,2], z = ~factors_mofa[,3], color = ~metadata$Subtype, colors = c("blue", "red", "green", "purple"),
+        type = "scatter3d", mode = "markers") %>%
+  layout(title = "3D Plot by Subtype")
+```
+ 
+ 
+```{r}
+p1 <- plot_biplot_mofa(factors_mofa, loadings_mofa$Mutations, color_by = metadata$Subtype, comps = c(1, 3),
+                        color_legend = "Subtype", shape_legend = NULL)
+p1 <- p1 +
+  geom_vline(xintercept=0, linetype="dashed") + 
+  geom_segment(aes(x = max(factors_mofa[,1]), xend = 0, y = 0, yend = 0), linetype = "dashed")
+p1
+ggsave(filename = "results/f1_f3.pdf", p1, width = 7, height = 4)
+
+p2 <- plot_biplot_mofa(factors_mofa, loadings_mofa$Mutations, color_by = factors_mofa[,2], shape_by = metadata$Subtype,
+                       comps = c(1, 3),
+                      color_legend = "Factor 2",  shape_legend = "Subtype")
+p2 <- p2 +
+  geom_vline(xintercept=0, linetype="dashed") + 
+  geom_segment(aes(x = max(factors_mofa[,1]), xend = 0, y = 0, yend = 0), linetype = "dashed")
+p2
+ggsave(filename = "results/f1_f3_f2.pdf", p2, width = 7, height = 4)
+
+```
+ 
+
+Considering 
+  - GBM = F1-
+  - ASTRO = F1+ and F3+
+  - OLIGO = F1+ and F3-
+  
+```{r}
+
+predicted_labels <- ifelse(out_mofa$Z[,"Factor 1"] < 0, "GBM", 
+                            ifelse(out_mofa$Z[,"Factor 1"] >0 & out_mofa$Z[,"Factor 3"] >0, "ASTRO", 
+                                   ifelse(out_mofa$Z[,"Factor 1"] > 0 & out_mofa$Z[,"Factor 3"] < 0, "OLIGO", NA)))
+table(real = out_mofa$metadata$Subtype, predicted = predicted_labels)
+#        predicted
+# real    ASTRO GBM OLIGO
+#   ASTRO   114   8    20
+#   GBM       0  79     1
+#   OLIGO    15   4    65
+classifier_metrics <- ml_test(predicted_labels, out_mofa$metadata$Subtype, output.as.table = TRUE)
+# some metrics from this command  
+classifier_metrics[,c("precision", "recall", "F1" )]
+mean(classifier_metrics$precision)
+mean(classifier_metrics$recall)
+mean(classifier_metrics$F1)
+```
+
+
+Considering 
+  - GBM = F1-
+  - LGG = F1+
+
+```{r}
+predicted_labels <- ifelse(out1$Z[,"Factor1"] < 0, "GBM", 
+                            ifelse(out1$Z[,"Factor1"] >0 , "LGG", NA))
+table(real = out1$metadata$Grade, predicted = predicted_labels)
+#     predicted
+# real  GBM LGG
+#   GBM  43  34
+#   LGG  45 163
+
+classifier_metrics <- ml_test(predicted_labels, out1$metadata$Grade, output.as.table = TRUE)
+# some metrics from this command  
+classifier_metrics[,c("precision", "recall", "F1" )]
+```
+
+
+
+```{r}
+plot_elbow_silh(c(1,3), out_mofa)
+plot_elbow_silh(c(1,2), out_mofa)
+
+p <- plot_roc_auc(factors_mofa, metadata, "Subtype") 
+ggsave(filename = paste0("results/", "auc", ".pdf"), plot = p, width = 8, height = 6, dpi = 300)
+```
+
+
+```{r}
+annotation_samples <- data.frame(Type = metadata$Type, Factor1 = factors_mofa[,1])
+
+plot_data_heatmap(model_mofa, factor = 1, view = "Mutations", groups = "all", 
+                  features = c(mutations_sel_f1_pos, mutations_sel_f1_neg), annotation_samples = annotation_samples,
+                  cluster_rows = FALSE, cluster_cols = FALSE, show_colnames = F)
+
+
+annotation_samples <- data.frame(Type = metadata$Type, Factor3 = factors_mofa[,3])
+plot_data_heatmap(model_mofa, factor = 3, view = "Mutations", groups = "all", 
+                  features = c(mutations_sel_f3_pos, mutations_sel_f3_neg), annotation_samples = annotation_samples, 
+                  cluster_rows = FALSE, cluster_cols = FALSE, show_colnames = F)
+```
+
+
+For factor 1 is very clear what is happening:
+  + values (0-3): present IDH1 mutation and do not present PTEN or EFGR.
+  - values (-3 to 0): present PTEN or EGFR and do not present the IDH1 mutation.
+
+
+For factor 3 is not that clear according to the value of the factor itself:
+  + values (0-2): present IDH1, TP53 and ATRX (do not CIC)
+  - values: present IDH1 and CIC (and do not TP53 and ATRX)
+
+
+
+VISUALISING IN THE DNA METHYLATION (variance just represented in factor 1,3 and 4)
+
+
+FACTOR 1
+
+```{r}
+plot_top_weights(model_mofa,
+   view = "Methylation",
+   factor = 1,
+   nfeatures = 30,     
+   scale = T,
+   sign = "positive"
+  )
+
+plot_top_weights(model_mofa,
+   view = "Methylation",
+   factor = 1,
+   nfeatures = 30,     
+   scale = T,
+   sign = "negative"
+  )
+
+plot_top_weights(model_mofa,
+   view = "Methylation",
+   factor = 1,
+   nfeatures = 30,     
+   scale = T
+  )
+```
+There are a lot of features
+```{r}
+summary(out_mofa$W$Methylation[out_mofa$W$Methylation[,"Factor 1"]>0,"Factor 1"])
+summary(out_mofa$W$Methylation[out_mofa$W$Methylation[,"Factor 1"]<0,"Factor 1"])
+
+summary(abs(out_mofa$W$Methylation[,"Factor 1"]))
+```
+
+
+```{r}
+methy_sel_f1 <- names(head(sort(abs(loadings_mofa$Methylation[, 1]), decreasing = TRUE), 30)) # all positive
+```
+
+
+```{r}
+plotCpg(M2B(t(omics.list$Methylation)), cpg = "", 
+        pheno = metadata$Subtype,  type = "categorical", 
+        ylab = "Beta values")
+
+```
+
+
+
+```{r}
+beta_df <- as.data.frame(t(M2B(t(omics.list$Methylation))))
+
+df_plot1 <- data.frame(
+  BetaValue = beta_df[,"cg25251738"],
+  Subtype = metadata$Subtype
+)
+df_plot1 <- df_plot1[!is.na(df_plot1$Subtype), ]
+
+p1 <- ggplot(df_plot1, aes(x = Subtype, y = BetaValue)) +
+  geom_jitter(width = 0.2, size = 2, alpha = 0.7) +  # scattered points
+  labs(x = "Subtype", y = "Beta Values") +
+  theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+       legend.title = element_text(size = rel(text_size), color = 'black'),
+     panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+p1
+ggsave(filename = "results/cg25251738.pdf", p1, width = 7, height = 4)
+
+df_plot2 <- data.frame(
+  BetaValue = beta_df[,"cg09656848"],
+  Subtype = metadata$Subtype
+)
+df_plot2 <- df_plot2[!is.na(df_plot2$Subtype), ]
+p2 <- ggplot(df_plot2, aes(x = Subtype, y = BetaValue)) +
+  geom_jitter(width = 0.2, size = 2, alpha = 0.7) +  # scattered points
+  labs(x = "Subtype", y = "Beta Values") +
+  theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+       legend.title = element_text(size = rel(text_size), color = 'black'),
+     panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+p2
+ggsave(filename = "results/cg09656848.pdf", p2, width = 7, height = 4)
+```
+Good way of observing the methylation proportion of a certain Cg for the types.
+
+[Functional Regions/Regional Differential Methylation (DMR)]
+
+Reason why -> methylation patterns are not usually found in isolated CpG, because DNA methylation is often regulated across regions (CpG islands or gene promoters). This clustering leads to either hypermethylated (silenced) or hypomethylated (active) regions.
+
+Using mCEATest (methylated CpGs Set Enrichment Analysis), which is a GSEA-based differential methylation analysis where gene sets are defined as sets of CpG sites in predefined regions, is capable to detect subtle but consistent methylation differences in predefined genomic regions from 450K platform. The others tools have two drawbacks:
+  1) may fail to detect significant DMRs in complex diseases or heterogeneous phenotypes, wherethere might be small differences among methylation signals but consistent across the analyzed regions and samples
+  2) average all sites in a given region, but if a significant pattern is associated to a subset of sites it may be underestimated if all sites are analyzed as a block
+  
+The predefined regions were defined based on R annotation packages IlluminaHumanMethylation450kanno.ilmn12.hg19
+They say that:
+  methylation in promoters => gene silencing
+  methylation in gene body => over expression; (BUT IN BRAIN IS NOT LIKE THAT)
+  CGI => not known
+
+# BEFORE - attempt of assocaiting CpGs with its genomic location and consequently the genes but not working 
+
+```{r}
+pheno <- as.matrix(out1$metadata$classification.2021.type)
+rownames(pheno) <- rownames(omics.list1$DNAMethylation)
+
+results_f1 <- mCSEATest(out1$W$DNAMethylation[,"Factor1"]/max(abs(out1$W$DNAMethylation[,"Factor1"])), 
+                      methData = M2B(t(omics.list1$DNAMethylation)), 
+                      pheno = pheno,
+                      regionsTypes = c("promoters", "genes"),
+                      platform = "450k")
+rm(pheno)
+```
+
+
+```{r}
+
+results_f1$promoters[results_f1$promoters$padj <0.05, ]
+results_f1$genes[results_f1$genes$padj <0.05 , ]
+```
+Promoters
+  - (+): GNMT, CFLAR (~> 2.5 NES)
+  - (-): ISM1, FGF13, B3GALT4, CLCN5, EDA, HSPA1A, HSPA1L, PGK1, SLC10A3, G6PD, WDR45, UXT, RPL10 (~< (-2.5) NES)
+  
+```{r}
+promoters_f1_pos <- c("GNMT", "CFLAR")
+promoters_f1_neg <- c("ISM1", "FGF13", "B3GALT4", "CLCN5", "EDA", "HSPA1A", "PGK1", "SLC10A3", "G6PD", "WDR45")
+```
+
+```{r}
+for (promoter in promoters_f1_pos){
+  print(mCSEAPlotGSEA(out1$W$DNAMethylation[,"Factor1"], results, regionType = "promoters", dmrName = promoter))
+}
+
+for (promoter in promoters_f1_neg){
+  print(mCSEAPlotGSEA(out1$W$DNAMethylation[,"Factor1"], results, regionType = "promoters", dmrName = promoter))
+}
+```
+
+  GNMT encodes an enzyme that mat have a role in secretion (is expressed in various neurons).
+  CFLAR is an apoptpsis regulator
+
+  ISM1 encodes a protein predicted to be involved in negative regulation of angiogenesis.
+  FGF13 encodes a protein. "FGF family members possess broad mitogenic and cell survival activities, and are involved in a variety of biological processes, including embryonic development, cell growth, morphogenesis, tissue repair, tumor growth, and invasion."
+  ...
+  
+```{r}
+methy_sel_f1_pos <- c()
+names_list <- c() 
+for (promoter in promoters_f1_pos) {
+  cpg_sites <- as.vector(strsplit(results_f1$promoters[promoter, "leadingEdge"], ", ")[[1]])
+  methy_sel_f1_pos <- append(methy_sel_f1_pos, cpg_sites)
+  names_list <- append(names_list, rep(promoter, length(cpg_sites)))
+}
+names(methy_sel_f1_pos) <- names_list
+
+methy_sel_f1_pos <- as.matrix(methy_sel_f1_pos)
+rownames(methy_sel_f1_pos) <- methy_sel_f1_pos[, 1]
+methy_sel_f1_pos[, 1] <- names_list
+
+
+methy_sel_f1_neg <- c()
+names_list <- c() 
+for (promoter in promoters_f1_neg) {
+  cpg_sites <- as.vector(strsplit(results_f1$promoters[promoter, "leadingEdge"], ", ")[[1]])
+  methy_sel_f1_neg <- append(methy_sel_f1_neg, cpg_sites)
+  names_list <- append(names_list, rep(promoter, length(cpg_sites)))
+}
+names(methy_sel_f1_neg) <- names_list
+
+methy_sel_f1_neg <- as.matrix(methy_sel_f1_neg)
+
+
+rownames(methy_sel_f1_neg) <- methy_sel_f1_neg[, 1]
+methy_sel_f1_neg[, 1] <- names_list
+
+```
+
+
+
+
+
+
+
+
+Integrate with gene expression -- DOES NOT WORK, issue of the pakcage not solved yet
+https://github.com/jordimartorell/mCSEA/issues/4 
+```{r}
+
+expr <- t(omics.list1$mRNA)[c(rownames(mrna_sel_f1_pos), rownames(mrna_sel_f1_neg)),  ]
+
+
+mCSEAIntegrate(results_f1, exprData = expr, 
+               regionType = "promoters", geneIDs = "ENSEMBL",
+               dmrName = "GNMT", makePlot = FALSE, minCor = 0)
+
+rm(a)
+```
+
+
+
+
+------#-------
+Gene Body: 
+  - (+) HLA-J, NCRNA00171 (>2.5 NES)
+  - (-) FGF13, IKBKG, (~< -2.5 ) -- may this is the case of methylation in a gene body does not necessarily mean an ove-expression 
+```{r}
+mCSEAPlotGSEA(out1$W$DNAMethylation[,"Factor1"], results, regionType = "genes", dmrName = "FGF13")
+```
+------#-------
+
+# END
+
+This package 
+
+
+Gene Ontology Testing
+
+```{r}
+
+methy_enrich_f1 <- run_methy_gsea(loadings_mofa$Methylation[,1], sign = "positive", 
+                                  background_vector = rownames(loadings_mofa$Methylation), 
+                                  q = 0.01, promoter = F, alpha = 0.05, filename = NULL)
+
+methy_enrich_f1_promoter <- run_methy_gsea(loadings_mofa$Methylation[,1], sign = "positive", 
+                                           background_vector = rownames(loadings_mofa$Methylation), q = 0.01, 
+                                           promoter = TRUE, alpha = 0.05, filename = NULL)
+```
+
+```{r}
+methy_enrich_f1
+
+methy_enrich_f1_promoter
+```
+
+```{r}
+methy_enrich_f1$TERM
+methy_enrich_f1_promoter$TERM
+```
+
+```{r}
+p1 <- plot_methy_gsea(methy_enrich_f1_promoter, sign = "positive", max.pathways = 10, 
+                filename = "methy_f1_prom", text_size = 2.0, dot_size = 5.0,
+                            alpha = 0.05)
+
+p2 <- plot_methy_gsea(methy_enrich_f1, sign = "positive", max.pathways = 10, 
+                filename = "methy_f1", text_size = 2.0, dot_size = 5.0,
+                            alpha = 0.05)
+
+p1
+p2
+```
+
+
+
+# BEFORE - DO NOT LIKE THIS
+
+
+
+
+
+FACTOR 3
+
+```{r}
+plot_top_weights(model_mofa,
+   view = "Methylation",
+   factor = 3,
+   nfeatures = 30,     
+   scale = T, 
+  )
+
+plot_top_weights(model_mofa,
+   view = "Methylation",
+   factor = 3,
+   nfeatures = 30,     
+   scale = T, 
+   sign = "positive",
+  )
+
+plot_top_weights(model_mofa,
+   view = "Methylation",
+   factor = 3,
+   nfeatures = 30,     
+   scale = T, 
+   sign = "negative",
+  )
+
+```
+
+```{r}
+summary(out1$W$DNAMethylation[out1$W$DNAMethylation[,"Factor3"] > 0,"Factor3"])
+summary(out1$W$DNAMethylation[out1$W$DNAMethylation[,"Factor3"] < 0,"Factor3"])
+```
+
+
+
+```{r}
+methy_sel_f3 <- names(head(sort(abs(loadings_mofa$Methylation[, 3]), decreasing = TRUE), 30)) # all negative
+```
+
+```{r}
+methy_sel_f4 <- names(head(sort(abs(loadings_mofa$Methylation[, 4]), decreasing = TRUE), 500))
+info.methy[methy_sel_f4, "chrm_A"]
+```
+
+
+Gene Ontology Testing
+
+
+
+---GOmeth
+```{r}
+methy_enrich_f3 <- run_methy_gsea(loadings_mofa$Methylation[,3], sign = "negative", 
+                                  background_vector = rownames(loadings_mofa$Methylation), 
+                                  q = 0.01, promoter = F, alpha = 0.05, filename = NULL)
+
+methy_enrich_f3_promoter <- run_methy_gsea(loadings_mofa$Methylation[,3], sign = "negative", 
+                                           background_vector = rownames(loadings_mofa$Methylation), q = 0.01, 
+                                           promoter = TRUE, alpha = 0.05, filename = NULL)
+```
+
+```{r}
+methy_enrich_f3$TERM
+methy_enrich_f3_promoter$TERM
+```
+
+
+```{r}
+p1 <- plot_methy_gsea(methy_enrich_f3_promoter, sign = "negative", max.pathways = 10, 
+                filename = "methy_f3_prom", text_size = 2.0, dot_size = 5.0,
+                            alpha = 0.05)
+p1
+
+p2 <- plot_methy_gsea(methy_enrich_f3, sign = "negative", max.pathways = 10, 
+                filename = "methy_f3", text_size = 2.0, dot_size = 5.0,
+                            alpha = 0.05)
+p2
+
+
+```
+
+
+```{r}
+rownames(methy_enrich_f1)
+
+ file <- read.csv("https://reactome.org/download/current/Pathways2GoTerms_human.txt", sep = "\t")
+file[file$GO_Term == rownames(methy_enrich_f3),]
+```
+
+
+
+
+
+
+
+
+```{r}
+
+annotation_samples <- data.frame(Subype = out_mofa$metadata$Subtype, Factor1 = factors_mofa[,1])
+
+plot_data_heatmap(model_mofa, factor = 1, view = "Methylation", groups = "all", 
+                  features = methy_sel_f1, annotation_samples = annotation_samples,
+                  cluster_rows = FALSE, cluster_cols = FALSE, show_colnames = F)
+
+
+annotation_samples <- data.frame(Type = out_mofa$metadata$Subtype, Factor3 = factors_mofa[,3])
+plot_data_heatmap(model_mofa, factor = 3, view = "Methylation", groups = "all", 
+                  features = methy_sel_f3, annotation_samples = annotation_samples, 
+                  cluster_rows = FALSE, cluster_cols = FALSE, show_colnames = F)
+```
+For factor 1 is very clear what is happening:
+  - values (-3 to 0): present low expression on methy_sel_f1_pos and high expression on methy_sel_f1_neg. This means that the patients here have the CGis with a very strong methylation signal on methy_sel_f1_neg. 
+
+
+For factor 3 is not very clear what is happening:
+  - values (very negative values): present high expression on methy_sel_f3_neg. This means that the patients here have CGis with a very strong methylation signal on methy_sel_f3_neg, which are mostly responsible for the transcription of RNA polymerase II. 
+  
+  
+
+
+
+
+```{r}
+table(info.methy[methy_sel_f1, "gene"])
+table(info.methy[methy_sel_f3, "gene"])
+```
+
+8 of the methy_sel_f3 are in ISM1 so this may be an importat gene
+
+
+
+
+    
+Is CELSR1 a biomarker for astrocytoma? 
+This is highly expressed in patients with F3- (GBM and OLIGO). So this may be under expressed in ASTRO patients.
+```{r}
+
+plotCpg(M2B(t(omics.list1$DNAMethylation)), cpg ="cg00884093", 
+        pheno = out1$metadata$Type,  type = "categorical", 
+        ylab = "Beta values")
+```
+
+
+
+
+
+
+    
+    
+
+VISUALISING IN miRNA (variance just in factor 1)
+```{r}
+plot_top_weights(model_mofa,
+   view = "miRNA",
+   factor = 1,
+   nfeatures = 30,     
+   scale = T)
+
+plot_top_weights(model_mofa,
+   view = "miRNA",
+   factor = 1,
+   nfeatures = 30,     
+   scale = T, 
+   sign = "positive" )
+
+
+plot_top_weights(model_mofa,
+   view = "miRNA",
+   factor = 1,
+   nfeatures = 30,     
+   scale = T,
+   sign = "negative")
+```
+FACTOR 1: 
+- Selects (+) ENSG00000278783, ENSG00000207575, ENSG00000266174
+
+
+
+```{r}
+mirna_sel_f1_ <- names(head(sort(abs(loadings_mofa$miRNA[, 1]), decreasing = TRUE), 3))
+```
+`
+
+
+http://yulab-smu.top/biomedical-knowledge-mining-book/enrichment-overview.html 
+```{r}
+keytypes(org.Hs.eg.db)
+bitr(mirna_sel_f1_, fromType="ENSEMBL", toType="SYMBOL", OrgDb = "org.Hs.eg.db")
+```
+
+```{r}
+mirna_sel_f1 <- info.mirna[mirna_sel_f1_, "gene_name"]
+```
+
+
+```{r}
+mirna_sel_f1 <- as.matrix(mirna_sel_f1)
+rownames(mirna_sel_f1) <- mirna_sel_f1_
+```
+
+
+
+
+
+```{r}
+annotation_samples <- data.frame(Type = out_mofa$metadata$Subtype, Factor1 = factors_mofa[,"Factor 1"])
+
+plot_data_heatmap(model_mofa, factor = 1, view = "miRNA", groups = "all", 
+                  features = c(rownames(mirna_sel_f1)), annotation_samples = annotation_samples,
+                  cluster_rows = FALSE, cluster_cols = FALSE, show_colnames = F)
+```
+ 
+
+
+
+
+VISUALIZING IN mRNA (factor 1,2,3)
+```{r}
+for (factor in c(1,2,3)){
+  print(plot_top_weights(model_mofa,
+   view = "mRNA",
+   factor = factor,
+   nfeatures = 30,     
+   scale = T
+  ))
+}
+
+```
+FACTOR 1
+
+```{r}
+mrna_sel_f1_ <- names(head(sort(abs(loadings_mofa$mRNA[, 1]), decreasing = TRUE), 30))
+```
+
+```{r}
+mrna_sel_f1 <- info.mrna[mrna_sel_f1_, "gene_name"]
+mrna_sel_f1
+```
+
+
+```{r}
+mrna_sel_f1 <- as.matrix(mrna_sel_f1)
+rownames(mrna_sel_f1) <- mrna_sel_f1_ # some positive, but most negative
+```
+
+
+
+```{r}
+v <- abs(loadings_mofa$mRNA[, 1])
+v <- (v - min(v)) / (max(v) - min(v))
+
+summary(v)
+v[mrna_sel_f1_]
+
+quantile(v, 0.90)
+quantile(v, 0.95)
+quantile(v, 0.99)
+```
+
+
+FACTOR 2
+
+```{r}
+mrna_sel_f2_ <- names(head(sort(abs(loadings_mofa$mRNA[, 2]), decreasing = TRUE), 30))
+```
+
+
+```{r}
+mrna_sel_f2 <- info.mrna[mrna_sel_f2_, "gene_name"]
+mrna_sel_f2
+```
+
+```{r}
+mrna_sel_f2 <- as.matrix(mrna_sel_f2)
+rownames(mrna_sel_f2) <- as.matrix(mrna_sel_f2_) # all positive
+```
+
+```{r}
+
+summary(abs(loadings_mofa$mRNA[, 2]))
+abs(loadings_mofa$mRNA[mrna_sel_f2_, 2])
+
+quantile(abs(loadings_mofa$mRNA[, 2]), 0.90)
+```
+
+
+
+
+FACTOR 3
+
+```{r}
+mrna_sel_f3_ <- names(head(sort(abs(loadings_mofa$mRNA[, 3]), decreasing = TRUE), 30))
+```
+
+
+```{r}
+mrna_sel_f3 <- info.mrna[mrna_sel_f3_, "gene_name"]
+mrna_sel_f3
+```
+
+
+```{r}
+bitr(mrna_sel_f3_pos, fromType="SYMBOL", toType="UNIPROT", OrgDb = "org.Hs.eg.db")
+bitr(mrna_sel_f3_neg, fromType="SYMBOL", toType="UNIPROT", OrgDb = "org.Hs.eg.db")
+```
+ 
+```{r}
+mrna_sel_f3 <- as.matrix(mrna_sel_f3)
+rownames(mrna_sel_f3) <- as.matrix(mrna_sel_f3_) # all positive
+```
+
+
+```{r}
+summary(abs(loadings_mofa$mRNA[, 3]))
+abs(loadings_mofa$mRNA[mrna_sel_f3_, 3])
+
+quantile(abs(loadings_mofa$mRNA[, 3]), 0.90)
+```
+
+
+
+The rows are scaled!
+
+```{r}
+
+annotation_samples <- data.frame(Subtype = out_mofa$metadata$Subtype, Factor1 = factors_mofa[,1])
+
+plot_data_heatmap(model_mofa, factor = 1, view = "mRNA", groups = "all", 
+                  features = as.vector(rownames(mrna_sel_f1)), annotation_samples = annotation_samples,
+                  cluster_rows = FALSE, cluster_cols = FALSE, show_colnames = F, scale = "row")
+
+annotation_samples <- data.frame(Subtype = out_mofa$metadata$Subtype, Factor2 = factors_mofa[,2])
+
+plot_data_heatmap(model_mofa, factor = 2, view = "mRNA", groups = "all", 
+                  features = as.vector(rownames(mrna_sel_f2)), annotation_samples = annotation_samples,
+                  cluster_rows = FALSE, cluster_cols = FALSE, show_colnames = F, scale = "row")
+
+annotation_samples <- data.frame(Subtype = out_mofa$metadata$Subtype, Factor3 = factors_mofa[,3])
+plot_data_heatmap(model_mofa, factor = 3, view = "mRNA", groups = "all", 
+                  features = as.vector(rownames(mrna_sel_f3)), annotation_samples = annotation_samples, 
+                  cluster_rows = FALSE, cluster_cols = FALSE, show_colnames = F,scale = "row")
+```
+For factor 1:
+  + values: high expression in mrna_sel_f1_pos
+
+For factor 3:
+  + values: high expression in mrna_sel_f3_pos 
+  - values (very negative values): high expression on mrna_sel_f3_neg, low expression on mrna_sel_f3_pos
+
+
+
+Gene Enrichment Analysis
+```{r}
+rownames(mrna_sel_f1)
+rownames(mrna_sel_f2)
+rownames(mrna_sel_f3)
+```
+
+```{r}
+a_f1 <- run_rna_gsea(loadings_mofa$mRNA[,1], sign = 0, alpha = 0.05)
+a_f1
+
+a_f2 <- run_rna_gsea(loadings_mofa$mRNA[,2], sign = 0, alpha = 0.05)
+a_f2
+
+
+a_f3 <- run_rna_gsea(loadings_mofa$mRNA[,3], sign = 0, alpha = 0.05)
+a_f3
+
+
+
+plot_gsea(a_f1, alpha = 0.05, max.pathways = 10, sign = 3, filename = "f1_mrna_pos")
+plot_gsea(a_f1, alpha = 0.05, max.pathways = 10, sign = -3, filename = "f1_mrna_neg")
+
+plot_gsea(a_f2, alpha = 0.05, max.pathways = 10, sign = 3, filename = "f2_mrna_pos")
+plot_gsea(a_f2, alpha = 0.05, max.pathways = 10, sign = -3, filename = "f2_mrna_neg")
+
+plot_gsea(a_f3, alpha = 0.05, max.pathways = 10, sign = 3, filename = "f3_mrna_pos")
+plot_gsea(a_f3, alpha = 0.05, max.pathways = 10, sign = -3, filename = "f3_mrna_neg")
+
+
+
+
+plot_categories_reactome(list("Factor 1"=a_f1[a_f1$NES<0,"ID"], "Factor 2"=a_f2[a_f2$NES>0, "ID"], "Factor 3"=a_f3[a_f3$NES>0, "ID"]), filename="mrna")
+
+```
+
+
+
+
+
+
+
+
+
+---> HeatMap
+```{r}
+Mutations_F1 <- rep("None", nrow(omics.list$Mutations))  # Default: no mutation
+Mutations_F3 <- rep("None", nrow(omics.list$Mutations))  # Default: no mutation
+
+# Check primary mutation status
+Mutations_F1[omics.list$Mutations[,"PTEN"] == 1 | omics.list$Mutations[,"EGFR"] == 1] <- "PTEN/EGFR"
+Mutations_F1[omics.list$Mutations[,"IDH1"] == 1] <- "IDH1"
+
+# Check secondary mutation status
+Mutations_F3[omics.list$Mutations[,"ATRX"] == 1 | omics.list$Mutations[,"TP53"] == 1] <- "ATRX/TP53"
+Mutations_F3[omics.list$Mutations[,"CIC"] == 1] <- "CIC"
+
+
+```
+
+```{r}
+lighten <- function(color, factor = 0.5){
+  col <- col2rgb(color)
+  col <- rgb(
+    red   = (1 - factor) * col[1,] + factor * 255,
+    green = (1 - factor) * col[2,] + factor * 255,
+    blue  = (1 - factor) * col[3,] + factor * 255,
+    maxColorValue = 255
+  )
+  return(col)
+}
+```
+
+
+```{r}
+heatmap <- matrix(data = NA, 
+                 nrow = length(c(mrna_sel_f1, mrna_sel_f2, mrna_sel_f3, mirna_sel_f1, 
+                               methy_sel_f1, methy_sel_f3)), 
+                 ncol = nrow(omics.list$Mutations))
+
+rownames(heatmap) <- c(
+                      rownames(mrna_sel_f1), rownames( mrna_sel_f2), rownames(mrna_sel_f3), 
+                      rownames(mirna_sel_f1),
+                      methy_sel_f1, methy_sel_f3)
+colnames(heatmap) <- rownames(omics.list$Mutations)
+
+
+for (row in 1:nrow(heatmap)){
+  
+  if (rownames(heatmap)[row] %in% colnames(omics.list$mRNA)){
+    for (col in 1: ncol(heatmap)){
+      heatmap[row, col] <- omics.list$mRNA[colnames(heatmap)[col], rownames(heatmap)[row]]
+    }
+  }
+ 
+  else if (rownames(heatmap)[row] %in% colnames(omics.list$miRNA)){
+    for (col in 1:ncol(heatmap)){
+      heatmap[row, col] <- omics.list$miRNA[colnames(heatmap)[col], rownames(heatmap)[row]]
+    }
+  
+  }
+  else{
+    for (col in 1:ncol(heatmap)){
+      heatmap[row, col] <- omics.list$Methylation[colnames(heatmap)[col], rownames(heatmap)[row]]
+    }
+    
+  }
+}
+rownames(heatmap) <- c(mrna_sel_f1,  mrna_sel_f2, mrna_sel_f3,
+                      mirna_sel_f1,
+                      methy_sel_f1, methy_sel_f3)
+
+
+
+ 
+Factor <- c( rep("F1", length(mrna_sel_f1)),
+                     rep("F2", length(mrna_sel_f2)),
+                     rep("F3", length(mrna_sel_f3)),
+                     rep("F1", length(mirna_sel_f1)),
+                     rep("F1", length(methy_sel_f1)),
+                     rep("F3", length(methy_sel_f3)))
+              
+
+
+ 
+
+annotation_row <- data.frame(Factor)
+rownames(annotation_row) <- rownames(heatmap)
+
+annotation_col <- data.frame(
+  Factor_1 = factors_mofa[colnames(heatmap),1],
+  Factor_2 = factors_mofa[colnames(heatmap),1],
+  Factor_3 = factors_mofa[colnames(heatmap),3],
+  Mutations_F1= factor(Mutations_F1, levels = c("IDH1", "PTEN/EGFR", "None")),
+  Mutations_F3 = factor(Mutations_F3, levels = c("ATRX/TP53", "CIC", "None")),
+  Subtype = metadata$Subtype
+)
+rownames(annotation_col) <- colnames(heatmap)
+
+library(RColorBrewer)
+library(scales)
+
+f1_color <- "#B2182B"  # red shade
+f2_color <- "#216867"  # green-teal shade
+f3_color <- "#253494"  # blue shade
+
+# Define annotation colors
+annotation_colors <- list(
+  Factor = c("F1" = f1_color, "F2" = f2_color, "F3" = f3_color),
+  Mutations_F1 = c("IDH1" = "#377eb8", "PTEN/EGFR" = "#e41a1c", "None" = "gray90"),
+  Mutations_F3 = c("ATRX/TP53" = "#984ea3", "CIC" = "#ff7f00", "None" = "gray90"),
+   Subtype = c(
+    "GBM" = "#333333",
+    "ASTRO" = "#66c2a5",
+    "OLIGO" = "#8da0cb"
+  ),
+ Factor_1 = colorRamp2(c(min(factors_mofa[,1]),  max(factors_mofa[,1])), c(f1_color,  lighten(f1_color, 0.8))),
+  Factor_2 = colorRamp2(c(min(factors_mofa[,2]),  max(factors_mofa[,2])), c(f2_color,  lighten(f2_color, 0.8))),
+  Factor_3 = colorRamp2(c(min(factors_mofa[,3]),  max(factors_mofa[,3])), c(f3_color,  lighten(f3_color, 0.8)))
+)
+
+
+
+
+library(ComplexHeatmap)
+library(circlize)
+
+min_val <- min(heatmap, na.rm = T)
+max_val <- max(heatmap, na.rm = T)
+
+col_fun <- colorRamp2(breaks = c(min_val, 0, max_val), colors = c("#268989", "white", "#E43F3F"))
+
+
+# Row annotation
+row_ha <- rowAnnotation(
+  df = annotation_row,
+  col = annotation_colors,
+  annotation_name_gp = gpar(fontsize = 20),
+  annotation_legend_param = list(
+    title_gp = gpar(fontsize = 20),
+    labels_gp = gpar(fontsize = 20)
+  )
+)
+
+# Column annotation
+col_ha <- HeatmapAnnotation(
+  df = annotation_col,
+  col = annotation_colors,
+  annotation_name_gp = gpar(fontsize = 20),
+  annotation_legend_param = list(
+    title_gp = gpar(fontsize = 20),
+    labels_gp = gpar(fontsize = 20)
+  )
+)
+
+# Heatmap with annotations
+ht <- Heatmap(
+  heatmap,
+  name = "Pearson Correlation",
+  col = col_fun,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_row_names = TRUE,
+  show_column_names = FALSE,
+  row_names_gp = gpar(fontsize = 20),
+  top_annotation = col_ha,
+  left_annotation = row_ha,
+  heatmap_legend_param = list(
+    title = NULL,
+    title_gp = gpar(fontsize = 0),
+    labels_gp = gpar(fontsize = 20),
+    legend_height = unit(120, "cm")
+  )
+)
+
+# Save to PDF
+pdf("results/feature_sample_heatmap.pdf", width = 50, height = 50)
+draw(ht, heatmap_legend_side = "right", annotation_legend_side = "right")
+dev.off()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+  
+  
+
+
+---> Comparison with Single Omic Analyses (Beatriz and Gabriel's work)
+
+MUTATIONS 
+
+From our analysis, 
+  - GBM: negative values of Factor 1
+  - ASTRO: positive values of Factor 1 and positive values of Factor 3
+  - OLIGO: positive values of Factor 1 and negative values of Factor 3
+  
+```{r}
+
+mutations_GBM_gabriel <- c("TTN", "TP53", "MUC16", "PIK3R1", "PIK3CA", "PTEN", "EGFR", "NF1", "FLG", "RYR2", "RB1", "PCLO", "SPTA1", "MUC17", "OBSCN", "LRP2", "AHNAK2", "HMCN1", "HSD17B7P2", "GPR98", "RYR3", "COL6A3", "PKHD1", "DNAH5", "KEL", "TCHH", "NBFP10", "FRG1B", "USH2A") # but first 5 belong also to ASTRO and OLIGO -- 29 mutations
+mutations_ASTRO_gabriel <- c("TP53", "ATRX", "TTN", "PIK3R1", "MUC16", "SMARCA4", "APOB") # -- 7 mutations
+mutations_OLIGO_gabriel <- c("CIC", "NOTCH1", "FUBP1", "PIK3CA") # -- 4 mutations
+```
+
+By the factors
+```{r}
+
+mutations_GBM_mine <- mutations_sel_f1_neg
+mutations_ASTRO_mine <- as.vector(c(mutations_sel_f1_pos, mutations_sel_f3_pos))
+mutations_OLIGO_mine <- as.vector(c(mutations_sel_f1_pos, mutations_sel_f3_neg))
+
+```
+
+Keeping more components
+```{r}
+
+m_f1_neg_20 <- plot_top_weights(model1, view = "Mutations", factors = 1, nfeatures = 20, scale = F, sign = "negative")
+m_f1_pos_20 <- plot_top_weights(model1, view = "Mutations", factors = 1, nfeatures = 20, scale = F, sign = "positive")
+
+m_f3_neg_20 <- plot_top_weights(model1, view = "Mutations", factors = 3, nfeatures = 20, scale = F, sign = "negative")
+m_f3_pos_20 <- plot_top_weights(model1, view = "Mutations", factors = 3, nfeatures = 20, scale = F, sign = "positive")
+
+
+#mutations_GBM_mine_top20 <- as.vector(m_f1_neg_20$data$feature)
+#mutations_ASTRO_mine_top20 <- c(intersect(as.vector(m_f1_pos_20$data$feature), as.vector(m_f3_pos_20$data$feature)))
+#mutations_OLIGO_mine_top20 <- c(intersect(as.vector(m_f1_pos_20$data$feature), as.vector(m_f3_neg_20$data$feature)))
+
+mutations_GBM_mine_top20 <- as.vector(m_f1_neg_20$data$feature)
+mutations_ASTRO_mine_top20 <- as.vector(m_f3_pos_20$data$feature)
+mutations_OLIGO_mine_top20 <- as.vector(m_f3_neg_20$data$feature)
+
+
+
+```
+
+```{r}
+library("VennDiagram")
+library("RColorBrewer")
+
+myCol <- brewer.pal(3, "Pastel2")
+
+venn.diagram(
+        x = list(mutations_GBM_gabriel,mutations_GBM_mine, mutations_GBM_mine_top20),
+        category.names = c("Gabriel" , "Factor " , "Top20"),
+        filename = 'GBM_venn_diagramm.png',
+        output = FALSE,
+        
+        # Output features
+        imagetype="png" ,
+        height = 480 , 
+        width = 480 , 
+        resolution = 300,
+        compression = "lzw",
+        
+        
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = myCol,
+        
+        # Numbers
+        cex = .6,
+        fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer",
+        cat.pos = c(-27, 27, 135),
+        cat.dist = c(0.055, 0.055, 0.085),
+        cat.fontfamily = "sans",
+        rotation = 1
+)
+
+
+venn.diagram(
+        x = list(mutations_OLIGO_gabriel,mutations_OLIGO_mine, mutations_OLIGO_mine_top20),
+        category.names = c("Gabriel" , "Factor " , "Top20"),
+        filename = 'OLIGO_venn_diagramm.png',
+        output = FALSE,
+        
+        # Output features
+        imagetype="png" ,
+        height = 480 , 
+        width = 480 , 
+        resolution = 300,
+        compression = "lzw",
+        
+        
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = myCol,
+        
+        # Numbers
+        cex = .6,
+        fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer",
+        cat.pos = c(-27, 27, 135),
+        cat.dist = c(0.055, 0.055, 0.085),
+        cat.fontfamily = "sans",
+        rotation = 1
+)
+
+
+venn.diagram(
+        x = list(mutations_ASTRO_gabriel,mutations_ASTRO_mine, mutations_ASTRO_mine_top20),
+        category.names = c("Gabriel" , "Factor " , "Top20"),
+        filename = 'ASTRO_venn_diagramm.png',
+        output = FALSE,
+        
+        # Output features
+        imagetype="png" ,
+        height = 480 , 
+        width = 480 , 
+        resolution = 300,
+        compression = "lzw",
+        
+        
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = myCol,
+        
+        # Numbers
+        cex = .6,
+        fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer",
+        cat.pos = c(-27, 27, 135),
+        cat.dist = c(0.055, 0.055, 0.085),
+        cat.fontfamily = "sans",
+        rotation = 1
+)
+
+rm(mutations_ASTRO_gabriel, mutations_GBM_gabriel,  mutations_OLIGO_gabriel)
+rm(mutations_ASTRO_mine, mutations_GBM_mine,mutations_OLIGO_mine)
+
+rm(m_f1_neg_20, m_f1_pos_20, m_f3_neg_20, m_f3_pos_20)
+rm(mutations_GBM_mine_top20,mutations_ASTRO_mine_top20, mutations_OLIGO_mine_top20)
+rm(myCol)
+
+```
+
+My conclusions:
+  1) Taking into account that he associated mutations with a group if they were present in at least 5% of the samples, that would mean that if 5/6 patients has a mutation (within the same group of 112), MOFA will not explain this since it captures the largest variance.
+  2) If we take a look at the loadings of the top20 mutations associated with each group, the loadings are really small, but it does a good order though, especially for GBM, since it is explained by just one factor.
+  3) For OLIGO, it can easily find the mutations found by Gabriel. For ASTRO, not that much.
+  4) We considered GBM = negative value of F1, ASTRO = positive values of F3, and OLIGO = negative values of F3. But LGG are a but more complex than that. We have to consider also the factor 1 (but since their positive loadings is LGG in geral, we just took factor 3 as the marker of ASTRO versus OLIGO)
+  
+  
+
+mRNA
+```{r}
+genes_bea <- c("LOXL1", "PCDHB3", "CADM3", "TNFRSF18", "MMP19", "IGFBP6", "RO60", "CEP97", "NOSTRIN",  "RPS27A")
+```
+
+```{r}
+
+intersect(genes_bea, info.rna.coding[,"gene_name"])
+info.rna.coding[info.rna.coding[,"gene_name"] == c("LOXL1", "PCDHB3", "CADM3", "TNFRSF18", "MMP19", "IGFBP6") , ]
+```
+
+
+```{r}
+genes_bea %in% mrna_sel_f1_pos
+genes_bea %in% mrna_sel_f1_neg
+genes_bea %in% mrna_sel_f3_pos
+genes_bea %in% mrna_sel_f3_neg
+```
+
+
+
+
+
+
+
+# See if out genes are important
+```{r}
+
+gbm_vs_lgg <- read.csv("../DGEresults/mrna_GBMvsLGG.csv", row.names = 1)
+
+gbm_vs_astro <- read.csv("../DGEresults/mrna_GBMvsASTRO.csv",  row.names = 1)
+gbm_vs_oligo <- read.csv("../DGEresults/mrna_GBMvsOLIGO.csv",  row.names = 1)
+astro_vs_oligo <- read.csv("../DGEresults/mrna_ASTROvsOLIGO.csv",  row.names = 1)
+
+
+```
+
+
+```{r}
+text_size <- 2
+```
+
+
+
+```{r}
+volcano_plot <- function(df, title_string){
+  # according to the cutoffs said
+  df$diffexpressed <- "NO"
+  df$diffexpressed[df$logFC > 1 & df$PValue < 0.05] <- "UP"
+  df$diffexpressed[df$logFC < -1 & df$PValue < 0.05] <- "DOWN"
+  head(df[order(df$PValue) & df$diffexpressed == 'DOWN', ])
+  
+  df$delabel <- ifelse(rownames(df) %in% rownames(head(df[order(df$PValue), ], 30)), rownames(df), NA)
+  df$delabel <- ifelse(!is.na(df$delabel), 
+                         bitr(df$delabel, fromType = "ENSEMBL", toType = "SYMBOL", OrgDb = org.Hs.eg.db)$SYMBOL, 
+                         NA)
+  
+  p <- ggplot(data = df, aes(x = logFC, y = -log10(PValue), col = diffexpressed,label = delabel)) +
+    geom_vline(xintercept = c(-0.6, 0.6), col = "gray", linetype = 'dashed') +
+    geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') +
+    geom_point(size = 1) +
+    scale_color_manual(values = c("#00AFBB", "grey", "#bb0c00"), 
+                       labels = c("Downregulated", "Not significant", "Upregulated")) +
+    coord_cartesian(ylim = c(0, 250), xlim = c(-10, 10)) + 
+    labs(color = "",x = expression("log"[2]*"FC"), y = expression("-log"[10]*"p-value")) + 
+    scale_x_continuous(breaks = seq(-10, 10, 2)) + 
+    ggtitle(title_string) + 
+    geom_text_repel(max.overlaps = Inf) + 
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(2), color = 'black'),
+      legend.title = element_text(size = rel(2), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+  
+  return(list(df, p))
+}
+
+```
+
+
+```{r}
+mrna_type <- volcano_plot(gbm_vs_lgg, "")
+mrna_lgg <- volcano_plot(astro_vs_oligo, "")
+
+
+mrna_gbmastro <- volcano_plot(gbm_vs_astro, "")
+mrna_gbmoligo <- volcano_plot(gbm_vs_oligo, "")
+```
+
+```{r}
+
+ggsave(filename = paste0("results/", "gbm_vs_lgg", ".pdf"), plot = mrna_type[[2]], width = 10, height = 7, dpi = 300)
+ggsave(filename = paste0("results/", "astro_vs_oligo", ".pdf"), plot = mrna_lgg[[2]], width = 10, height = 7, dpi = 300)
+ggsave(filename = paste0("results/", "gbm_vs_astro", ".pdf"), plot = mrna_gbmastro[[2]], width =10, height = 7, dpi = 300)
+ggsave(filename = paste0("results/", "gbm_vs_oligo", ".pdf"), plot = mrna_gbmoligo[[2]], width = 0, height = 7, dpi = 300)
+```
+
+
+```{r}
+
+#write.csv(a, "results/dge_f1_mrna.csv", row.names = T)
+
+
+mrna_type[[1]][rownames(mrna_sel_f1), ] # are the genes of f1 really signifcant to GBMvsLGG?
+mrna_lgg[[1]][rownames(mrna_sel_f3), ] # are the genes of f3 really signficant to ASTROvsOLIGO?
+
+
+
+mrna_gbmastro[[1]][rownames(mrna_sel_f3), ]
+
+# are the genes of F2 significant of lower grade compared to higher grade? 
+mrna_gbmastro[[1]][rownames(mrna_sel_f2), ]
+mrna_gbmoligo[[1]][rownames(mrna_sel_f2), ]
+mrna_lgg[[1]][rownames(mrna_sel_f2), ]
+
+
+
+
+```
+
+
+## Validation
+```{r}
+conc_matrix <- cbind(omics.list$Methylation, omics.list$mRNA)
+conc_matrix <- cbind(conc_matrix, omics.list$miRNA)
+
+
+conc_matrix <- conc_matrix[,c(methy_sel_f1, mrna_sel_f1_)]
+
+
+correlation_matrix <- cor(conc_matrix, method = "pearson", use = "na.or.complete")
+rownames(correlation_matrix) <- c(methy_sel_f1, mrna_sel_f1)
+
+
+```
+
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+
+
+col_fun <- colorRamp2(c(-1, 0, 1), c("#268989", "white", "#E43F3F"))
+
+
+ht <- Heatmap(
+  correlation_matrix,
+  name = "Pearson Correlation",
+  col = col_fun,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_row_names = TRUE,
+  show_column_names = FALSE,
+  row_names_gp = gpar(fontsize = 20),
+  heatmap_legend_param = list(
+        title = NULL,  
+    title_gp = gpar(fontsize = 0),  
+    labels_gp = gpar(fontsize = 20),
+    legend_height = unit(49, "cm")  
+  )
+)
+
+
+pdf("results/feature_correlation_heatmap_f1.pdf", width = 20, height = 20)
+draw(ht)
+dev.off()
+```
+
+
+
+```{r}
+conc_matrix <- cbind(omics.list$Methylation, omics.list$mRNA)
+conc_matrix <- cbind(conc_matrix, omics.list$miRNA)
+
+
+conc_matrix <- conc_matrix[,c(methy_sel_f3, mrna_sel_f3_)]
+
+
+correlation_matrix <- cor(conc_matrix, method = "pearson", use = "na.or.complete")
+rownames(correlation_matrix) <- c(methy_sel_f3, mrna_sel_f3)
+
+
+```
+
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+
+
+col_fun <- colorRamp2(c(-1, 0, 1), c("#268989", "white", "#E43F3F"))
+
+
+ht <- Heatmap(
+  correlation_matrix,
+  name = "Pearson Correlation",
+  col = col_fun,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_row_names = TRUE,
+  show_column_names = FALSE,
+  row_names_gp = gpar(fontsize = 20),
+  heatmap_legend_param = list(
+        title = NULL,  
+    title_gp = gpar(fontsize = 0),  
+    labels_gp = gpar(fontsize = 20),
+    legend_height = unit(49, "cm")  
+  )
+)
+
+
+pdf("results/feature_correlation_heatmap_f3.pdf", width = 20, height = 20)
+draw(ht)
+dev.off()
+```
+
+
+```{r}
+conc_matrix <- cbind(omics.list$Methylation, omics.list$mRNA)
+conc_matrix <- cbind(conc_matrix, omics.list$miRNA)
+
+
+conc_matrix <- conc_matrix[,c(methy_sel_f1, mrna_sel_f1_, methy_sel_f3, mrna_sel_f3_)]
+
+
+correlation_matrix <- cor(conc_matrix, method = "pearson", use = "na.or.complete")
+rownames(correlation_matrix) <- c(methy_sel_f1, mrna_sel_f1, methy_sel_f3, mrna_sel_f3)
+
+
+```
+
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+
+
+col_fun <- colorRamp2(c(-1, 0, 1), c("#268989", "white", "#E43F3F"))
+
+
+ht <- Heatmap(
+  correlation_matrix,
+  name = "Pearson Correlation",
+  col = col_fun,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_row_names = TRUE,
+  show_column_names = FALSE,
+  row_names_gp = gpar(fontsize = 20),
+  heatmap_legend_param = list(
+        title = NULL,  
+    title_gp = gpar(fontsize = 0),  
+    labels_gp = gpar(fontsize = 20),
+    legend_height = unit(75, "cm")  
+  )
+)
+
+
+pdf("results/feature_correlation_heatmap_all.pdf", width = 30, height = 30)
+draw(ht)
+dev.off()
+```
+
+
+
+```{r}
+
+
+library(biomaRt)
+mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+```
+
+
+```{r}
+gene_locations <- getBM(
+  attributes = c("ensembl_gene_id", "chromosome_name", "start_position", "end_position", "external_gene_name"),
+  filters = "ensembl_gene_id",
+  values = mrna_sel_f1_,
+  mart = mart
+)
+rownames(gene_locations) <- gene_locations$ensembl_gene_id
+```
+
+```{r}
+a <- info.methy[methy_sel_f1, "chrm_A"]
+a <- sub("^chr", "", a)
+
+b <- gene_locations[mrna_sel_f1_, "chromosome_name"]
+b <- ifelse(b == "X" | b == "Y", "23", b )
+
+f1_asso <- matrix(data = 0, 
+                  nrow = length(mrna_sel_f1_), 
+                  ncol = length(methy_sel_f1),
+                  dimnames = list(mrna_sel_f1, methy_sel_f1))
+
+for (i in seq_along(b)) {
+  for (j in seq_along(a)) {
+    if (!is.na(b[i]) && !is.na(a[j]) && b[i] == a[j]) {
+      f1_asso[i, j] <- 1
+    }
+  }
+}
+
+```
+
+```{r}
+library(reshape2)
+plot_df <- melt(f1_asso, varnames = c("mRNA", "Methylation"))
+plot_df$value <- ifelse(is.na(plot_df$value), 0, plot_df$value)
+
+ggplot(plot_df, aes(x = Methylation, y = mRNA, fill = as.factor(value))) +
+  geom_tile(color = "grey70") +
+  scale_fill_manual(values = c("0" = "white", "1" = "red"), name = "Match") +
+  theme_minimal(base_size = 12) +
+  labs(title = "") +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 7),
+    axis.text.y = element_text(size = 7),
+    axis.title = element_blank()
+  )
+```
+
+heatmap with CpGs and its related Gene
+
+
+```{r}
+gene_locations <- getBM(
+  attributes = c("ensembl_gene_id", "chromosome_name", "start_position", "end_position", "external_gene_name"),
+  filters = "ensembl_gene_id",
+  values = mrna_sel_f3_,
+  mart = mart
+)
+rownames(gene_locations) <- gene_locations$ensembl_gene_id
+```
+
+```{r}
+a <- info.methy[methy_sel_f3, "chrm_A"]
+a <- sub("^chr", "", a)
+
+b <- gene_locations[mrna_sel_f3_, "chromosome_name"]
+b <- ifelse(b == "X" | b == "Y", "23", b )
+
+f3_asso <- matrix(data = 0, 
+                  nrow = length(mrna_sel_f3_), 
+                  ncol = length(methy_sel_f3),
+                  dimnames = list(mrna_sel_f3, methy_sel_f3))
+
+for (i in seq_along(b)) {
+  for (j in seq_along(a)) {
+    if (!is.na(b[i]) && !is.na(a[j]) && b[i] == a[j]) {
+      f3_asso[i, j] <- 1
+    }
+  }
+}
+
+```
+
+```{r}
+library(reshape2)
+plot_df <- melt(f3_asso, varnames = c("mRNA", "Methylation"))
+plot_df$value <- ifelse(is.na(plot_df$value), 0, plot_df$value)
+
+ggplot(plot_df, aes(x = Methylation, y = mRNA, fill = as.factor(value))) +
+  geom_tile(color = "grey70") +
+  scale_fill_manual(values = c("0" = "white", "1" = "red"), name = "Match") +
+  theme_minimal(base_size = 12) +
+  labs(title = "") +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, size = 7),
+    axis.text.y = element_text(size = 7),
+    axis.title = element_blank()
+  )
+```
+
+
+
+
+
+## Survival Analysis
+```{r}
+mRNA_all <- as.matrix(read.csv("../DataSets/processed_assays/assay_rna_coding.csv", row.names = 1))
+dna_all <- as.matrix(read.csv("../DataSets/processed_assays/assay_methylation.csv", row.names = 1))
+
+classification <- as.matrix(read.csv("../DataSets/SIMPLIFIED_CLASSIFICATION_TCGA_2016_2021.csv", row.names = 1))
+survival.complete <- as.matrix(read.csv("../DataSets/processed_assays/survival_complete.csv", row.names = 1))
+
+
+classification <- classification[,"classification.2021"]
+classification <- ifelse(classification == "glioblastoma", "GBM", 
+  ifelse(classification  == "astrocytoma", "ASTRO",
+  ifelse(classification  == "oligodendroglioma", "OLIGO",
+      NA)))
+
+
+mRNA_all <- mRNA_all[intersect(rownames(mRNA_all), intersect(rownames(survival.complete), names(classification))), ] # 652
+dna_all <- dna_all[intersect(rownames(dna_all), intersect(rownames(survival.complete), names(classification))), ]
+
+survival.complete <- survival.complete[rownames(mRNA_all), ]
+classification <- classification[rownames(mRNA_all)]
+survival.complete <- as.data.frame(survival.complete)
+
+survival.complete_dna <- survival.complete[rownames(dna_all), ]
+classification_dna <- classification[rownames(dna_all)]
+survival.complete_dna <- as.data.frame(survival.complete_dna)
+```
+
+
+
+
+```{r}
+results_surv_f2 <- data.frame(Gene = character(), P_Value = numeric(), stringsAsFactors = FALSE)
+data <- survival.complete
+for (gene_sel in mrna_sel_f2_){
+  
+ 
+  median <- median(mRNA_all[,gene_sel], na.rm = TRUE)
+  data$gene_group <- ifelse(mRNA_all[,gene_sel] >= median, "High", "Low")
+  
+  surv_obj <- Surv(time = data$Time, event = data$Status)
+
+  km_fit <- survfit(surv_obj ~ gene_group, data = data)
+  
+  log_rank_test <- survdiff(surv_obj ~ gene_group, data = data)
+  p_value <- 1 - pchisq(log_rank_test$chisq, length(log_rank_test$n) - 1)  
+
+  results_surv_f2 <- rbind(results_surv_f2, data.frame(Gene = gene_sel, P_Value = p_value))
+  
+   p <- ggsurvplot(km_fit, data = data, 
+               pval = TRUE, 
+               risk.table = F, 
+               legend.title = "Gene Expression",
+               legend.labs = c("High Expression", "Low Expression"),
+               xlab = "Time (days)", ylab = "Survival Probability")
+  p <- p$plot +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+  
+  print(p)
+}
+
+print(results_surv_f2)
+```
+
+
+```{r}
+
+
+results_surv_f2_lgg <- data.frame(Gene = character(), P_Value = numeric(), stringsAsFactors = FALSE)
+data <- survival.complete[c(names(classification == "OLIGO"),names(classification == "ASTRO")), ]
+
+for (gene_sel in mrna_sel_f2_) {
+  
+ 
+  median <- median(mRNA_all[c(names(classification == "OLIGO"),names(classification == "ASTRO")), gene_sel], na.rm = TRUE)
+  
+
+  data$gene_group <- ifelse(mRNA_all[c(names(classification == "OLIGO"),names(classification == "ASTRO")), gene_sel] >= median, "High", "Low")
+  
+  
+  surv_obj <- Surv(time = survival.complete[c(names(classification == "OLIGO"),names(classification == "ASTRO")), "Time"], 
+                   event = survival.complete[c(names(classification == "OLIGO"),names(classification == "ASTRO")), "Status"])
+  
+
+  km_fit <- survfit(surv_obj ~ gene_group, data = data)
+
+  log_rank_test <- survdiff(surv_obj ~ gene_group, data = data)
+  p_value <- 1 - pchisq(log_rank_test$chisq, length(log_rank_test$n) - 1)  
+  
+  
+  results_surv_f2_lgg <- rbind(results_surv_f2_lgg, data.frame(Gene = gene_sel, P_Value = p_value))
+  
+  
+  p <- ggsurvplot(km_fit, data = data, 
+               pval = TRUE, 
+               risk.table = F, 
+               legend.title = "Gene Expression",
+               legend.labs = c("High Expression", "Low Expression"),
+               xlab = "Time (days)", ylab = "Survival Probability")
+  p <- p$plot +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+  print(p)
+}
+
+
+print(results_surv_f2_lgg)
+
+
+```
+
+
+
+
+
+```{r}
+
+results_surv_f1 <- data.frame(Gene = character(), P_Value = numeric(), stringsAsFactors = FALSE)
+data <- survival.complete
+for (gene_sel in mrna_sel_f1_){
+  
+ 
+  median <- median(mRNA_all[,gene_sel], na.rm = TRUE)
+  data$gene_group <- ifelse(mRNA_all[,gene_sel] >= median, "High", "Low")
+  
+  surv_obj <- Surv(time = data$Time, event = data$Status)
+
+  km_fit <- survfit(surv_obj ~ gene_group, data = data)
+
+  
+  log_rank_test <- survdiff(surv_obj ~ gene_group, data = data)
+  p_value <- log_rank_test$pvalue
+  
+  results_surv_f1 <- rbind(results_surv_f1, data.frame(Gene = gene_sel, P_Value = p_value))
+  
+   p <- ggsurvplot(km_fit, data = data, 
+               pval = TRUE, 
+               risk.table = F, 
+               legend.title = "Gene Expression",
+               legend.labs = c("High Expression", "Low Expression"),
+               xlab = "Time (days)", ylab = "Survival Probability")
+  p <- p$plot +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+  
+  if (gene_sel == "ENSG00000165406"||gene_sel == "ENSG00000269190"){
+    ggsave(filename = paste0("results/", gene_sel, "_sa.pdf"), plot = p, width = 10, height = 7, dpi = 300)
+  }
+  print(p)
+}
+
+print(results_surv_f1)
+```
+
+
+```{r}
+results_surv_f3_gbm <- data.frame(Gene = character(), P_Value = numeric(), stringsAsFactors = FALSE)
+data <- survival.complete[names(classification == "GBM"), ]
+
+for (gene_sel in mrna_sel_f3_) {
+  
+ 
+  median <- median(mRNA_all[names(classification == "GBM"), gene_sel], na.rm = TRUE)
+  
+
+  data$gene_group <- ifelse(mRNA_all[names(classification == "GBM"), gene_sel] >= median, "High", "Low")
+  
+  
+  surv_obj <- Surv(time = survival.complete[names(classification == "GBM"), "Time"], 
+                   event = survival.complete[names(classification == "GBM"), "Status"])
+  
+
+  km_fit <- survfit(surv_obj ~ gene_group, data = data)
+
+  log_rank_test <- survdiff(surv_obj ~ gene_group, data = data)
+  p_value <- log_rank_test$pvalue
+  
+  
+  results_surv_f3_gbm <- rbind(results_surv_f3_gbm, data.frame(Gene = gene_sel, P_Value = p_value))
+  
+  
+  p <- ggsurvplot(km_fit, data = data, 
+                  pval = TRUE, 
+                  legend.title = "Gene Expression",
+                  risk.table = FALSE,            
+                  legend.labs = c("High Expression", "Low Expression"),
+                  xlab = "Time (days)", 
+                  ylab = "Survival Probability")
+  print(p)
+}
+
+
+print(results_surv_f3_gbm)
+
+```
+
+
+
+```{r}
+results_surv_f3_lgg <- data.frame(Gene = character(), P_Value = numeric(), stringsAsFactors = FALSE)
+data <- survival.complete[c(names(classification == "OLIGO"), names(classification == "ASTRO")), ]
+
+for (gene_sel in mrna_sel_f3_) {
+  
+ 
+  median <- median(mRNA_all[c(names(classification == "OLIGO"), names(classification == "ASTRO")), gene_sel], na.rm = TRUE)
+  
+
+  data$gene_group <- ifelse(mRNA_all[c(names(classification == "OLIGO"), names(classification == "ASTRO")), gene_sel] >= median, "High", "Low")
+  
+  
+  surv_obj <- Surv(time = survival.complete[c(names(classification == "OLIGO"), names(classification == "ASTRO")), "Time"], 
+                   event = survival.complete[c(names(classification == "OLIGO"), names(classification == "ASTRO")), "Status"])
+  
+
+  km_fit <- survfit(surv_obj ~ gene_group, data = data)
+
+  log_rank_test <- survdiff(surv_obj ~ gene_group, data = data)
+  p_value <- log_rank_test$pvalue
+  
+  
+  results_surv_f3_lgg <- rbind(results_surv_f3_lgg, data.frame(Gene = gene_sel, P_Value = p_value))
+  
+  
+  p <- ggsurvplot(km_fit, data = data, 
+               pval = TRUE, 
+               risk.table = F, 
+               legend.title = "Gene Expression",
+               legend.labs = c("High Expression", "Low Expression"),
+               xlab = "Time (days)", ylab = "Survival Probability")
+  p <- p$plot +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+  print(p)
+}
+
+
+print(results_surv_f3_lgg)
+```
+
+
+Save everything, the gene names + the p-value
+```{r}
+
+results_surv_f1$Gene_Name <- mrna_sel_f1
+
+results_surv_f2$Gene_Name <- mrna_sel_f2
+results_surv_f2_lgg$Gene_Name <- mrna_sel_f2
+
+
+results_surv_f3_gbm$Gene_Name <- mrna_sel_f3
+results_surv_f3_lgg$Gene_Name <- mrna_sel_f3
+
+
+
+```
+
+```{r}
+write.csv(results_surv_f1, "results/results_surv_f1.csv", row.names = TRUE)
+
+write.csv(results_surv_f2, "results/results_surv_f2.csv", row.names = TRUE)
+write.csv(results_surv_f2_lgg, "results/results_surv_f2_lgg.csv", row.names = TRUE)
+
+write.csv(results_surv_f3_gbm, "results/results_surv_f3_gbm.csv", row.names = TRUE)
+write.csv(results_surv_f3_lgg, "results/results_surv_f3_lgg.csv", row.names = TRUE)
+
+
+```
+
+FOR DNA
+
+```{r}
+results_surv_f1_dna <- data.frame(Gene = character(), P_Value = numeric(), stringsAsFactors = FALSE)
+data <- survival.complete_dna
+for (dna_sel in methy_sel_f1){
+  
+ 
+  median <- median(dna_all[,dna_sel], na.rm = TRUE)
+  data$dna_group <- ifelse(dna_all[,dna_sel] >= median, "High", "Low")
+  
+  surv_obj <- Surv(time = data$Time, event = data$Status)
+
+  km_fit <- survfit(surv_obj ~ dna_group, data = data)
+  
+  log_rank_test <- survdiff(surv_obj ~ dna_group, data = data)
+  p_value <- log_rank_test$pvalue
+
+  results_surv_f1_dna <- rbind(results_surv_f1_dna, data.frame(Gene = dna_sel, P_Value = p_value))
+  
+   p <- ggsurvplot(km_fit, data = data, 
+               pval = TRUE, 
+               risk.table = F, 
+               legend.title = "Gene Expression",
+               legend.labs = c("High Expression", "Low Expression"),
+               xlab = "Time (days)", ylab = "Survival Probability")
+  p <- p$plot +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+  
+  print(p)
+}
+
+print(results_surv_f1_dna)
+```
+
+
+
+```{r}
+results_surv_f3_dna <- data.frame(Gene = character(), P_Value = numeric(), stringsAsFactors = FALSE)
+selected_samples <- names(classification_dna)[classification_dna %in% c("OLIGO", "ASTRO")]
+
+
+data <- survival.complete_dna[selected_samples, ]
+for (dna_sel in methy_sel_f3){
+  
+ 
+  median <- median(dna_all[selected_samples,dna_sel], na.rm = TRUE)
+  data$dna_group <- ifelse(dna_all[selected_samples,dna_sel] >= median, "High", "Low")
+  
+  surv_obj <- Surv(time = data$Time, event = data$Status)
+
+  km_fit <- survfit(surv_obj ~ dna_group, data = data)
+  
+  log_rank_test <- survdiff(surv_obj ~ dna_group, data = data)
+  p_value <- log_rank_test$pvalue
+
+  results_surv_f3_dna <- rbind(results_surv_f3_dna, data.frame(Gene = dna_sel, P_Value = p_value))
+  
+   p <- ggsurvplot(km_fit, data = data, 
+               pval = TRUE, 
+               risk.table = F, 
+               legend.title = "Gene Expression",
+               legend.labs = c("High Expression", "Low Expression"),
+               xlab = "Time (days)", ylab = "Survival Probability")
+  p <- p$plot +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+  
+  print(p)
+}
+
+print(results_surv_f3_dna)
+```
+
+
+
+
+```{r}
+results_surv_f3_dna_gbm <- data.frame(Gene = character(), P_Value = numeric(), stringsAsFactors = FALSE)
+
+selected_samples <- names(classification_dna)[classification_dna %in% c("GBM")]
+data <- survival.complete_dna[selected_samples, ]
+for (dna_sel in methy_sel_f3){
+  
+ 
+  median <- median(dna_all[selected_samples,dna_sel], na.rm = TRUE)
+  data$dna_group <- ifelse(dna_all[selected_samples,dna_sel] >= median, "High", "Low")
+  
+  surv_obj <- Surv(time = data$Time, event = data$Status)
+
+  km_fit <- survfit(surv_obj ~ dna_group, data = data)
+  
+  log_rank_test <- survdiff(surv_obj ~ dna_group, data = data)
+  p_value <- log_rank_test$pvalue
+
+  results_surv_f3_dna_gbm <- rbind(results_surv_f3_dna_gbm, data.frame(Gene = dna_sel, P_Value = p_value))
+  
+   p <- ggsurvplot(km_fit, data = data, 
+               pval = TRUE, 
+               risk.table = F, 
+               legend.title = "Gene Expression",
+               legend.labs = c("High Expression", "Low Expression"),
+               xlab = "Time (days)", ylab = "Survival Probability")
+  p <- p$plot +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+  
+  print(p)
+}
+
+print(results_surv_f3_dna_gbm)
+```
+
+
+
+
+
+```{r}
+write.csv(results_surv_f1_dna, "results/results_surv_f1_dna.csv", row.names = TRUE)
+write.csv(results_surv_f3_dna, "results/results_surv_f3_dna_lgg.csv", row.names = TRUE)
+write.csv(results_surv_f3_dna_gbm, "results/results_surv_f3_dna_gbm.csv", row.names = TRUE)
+```
+
+
+
+
+
+## More about the CpGs and the respective genes
+
+correlation-FACTOR 1
+
+GNMT = "ENSG00000124713"
+It is close to "cg19070139" "cg16590910". These are in the same chromosme as CUL7 (factor 1 gene)
+
+In the same chromosome is cg01843034 (not near ny gene)
+
+ with the gene GNMT
+```{r}
+
+
+df_1 <- data.frame(
+  Methylation_beta = t(M2B(t(omics.list$Methylation)))[,"cg19070139"],
+  Methylation = omics.list$Methylation[,"cg19070139"],
+  Expression = omics.list$mRNA[,"ENSG00000124713"],
+  Type = metadata$Type
+)
+df_1 <- df_1[df_1$Type %in% c("GBM", "LGG"), ]
+
+
+df_3 <- data.frame(
+  Methylation_beta = t(M2B(t(omics.list$Methylation)))[, "cg19070139"],
+  Methylation = omics.list$Methylation[,"cg19070139"],
+  Expression = omics.list$mRNA[,"ENSG00000044090"],
+  Type = metadata$Type
+)
+df_3 <- df_3[df_3$Type %in% c("GBM", "LGG"), ]
+
+
+
+
+
+# Plot
+p1 <- ggplot(df_1, aes(x = Methylation_beta, y = Expression, color = Type)) +
+  geom_smooth(method = "lm", se = T) +
+  geom_point() +
+  scale_color_manual(values = c('#FF7400', '#009999')) +
+  stat_cor(aes(x = Methylation, y = Expression,  color = Type),
+           label.x = 0.6) +
+    labs(
+    x = "cg19070139",
+    y = "GNMT"
+  ) 
+
+  p1 <- p1 + theme(
+        axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+        axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+        axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+        axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+        legend.text = element_text(size = rel(text_size), color = 'black'),
+        legend.title = element_text(size = rel(text_size), color = 'black'),
+        panel.grid.minor = element_blank(), 
+        panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+        panel.background = element_blank(),
+      ) 
+  p1
+
+  
+  p3 <- ggplot(df_3, aes(x = Methylation, y = Expression, color = Type)) +
+  geom_smooth(method = "lm", se = T) +
+  geom_point() +
+  scale_color_manual(values = c('#FF7400', '#009999')) +
+  stat_cor(aes(x = Methylation, y = Expression,  color = Type),
+           label.x = 0.6) +
+      labs(
+    x = "cg19070139",
+    y = "CUL7"
+  ) 
+
+  p3 <- p3 + theme(
+        axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+        axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+        axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+        axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+        legend.text = element_text(size = rel(text_size), color = 'black'),
+        legend.title = element_text(size = rel(text_size), color = 'black'),
+        panel.grid.minor = element_blank(), 
+        panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+        panel.background = element_blank(),
+      ) 
+  p3
+  
+ggsave(filename = "results/GNMT_cg19070139.pdf", plot = p1, width = 10, height = 7, dpi = 300)
+ggsave(filename = "results/CUL7_cg19070139.pdf", plot = p3, width = 10, height = 7, dpi = 300)
+
+```
+
+factor 3
+ism1: ENSG00000101230
+```{r}
+a <- rownames(info.methy[rownames(info.methy) %in% methy_sel_f3 & info.methy$gene == "ISM1",])
+
+for (cg in a){
+  
+  
+  df <- data.frame(
+  Methylation = t(M2B(t(omics.list$Methylation)))[,cg],
+  Expression = omics.list$mRNA[,"ENSG00000101230"],
+  Subtype = metadata$Subtype
+  )
+  
+  df_lgg <- df[df$Subtype %in% c("ASTRO", "OLIGO"), ]
+  
+  p <- ggplot(df_lgg, aes(x = Methylation, y = Expression, color = Subtype)) +
+  geom_smooth(method = "lm", se = T) +
+  geom_point() +
+  labs(
+    x = paste0("", cg),
+    y = "ISM1"
+  ) +
+  scale_color_manual(values = c('#FF7400', '#009999')) +
+  stat_cor(aes(x = Methylation, y = Expression,  color = Subtype),
+           label.x = 0.6)
+
+  p <- p + theme(
+        axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+        axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+        axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+        axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+        legend.text = element_text(size = rel(text_size), color = 'black'),
+        legend.title = element_text(size = rel(text_size), color = 'black'),
+        panel.grid.minor = element_blank(), 
+        panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+        panel.background = element_blank(),
+      ) 
+  
+  if (cg == "cg09491991" | cg == "cg26322248" ){
+    ggsave(filename = paste0("results/ISM1_", cg, "_lgg.pdf"), plot = p, width = 10, height = 7, dpi = 300)
+  }
+  print(p)
+
+}
+```
+
+
+
+factor 3:
+"ENSG00000101230" = ISM1
+"ENSG00000214336" = FOXI3
+"ENSG00000166006" = KCNC2
+
+
+```{r}
+t <- data.frame(info.methy[methy_sel_f3,"gene"],  methy_sel_f3)
+```
+
+```{r}
+cg_ism1 <- t$methy_sel_f3[which(t$info.methy.methy_sel_f3...gene..=="ISM1")] 
+cg_foxi3 <- t$methy_sel_f3[which(t$info.methy.methy_sel_f3...gene..=="FOXI3")]
+cg_kcnc2 <- t$methy_sel_f3[which(t$info.methy.methy_sel_f3...gene..=="KCNC2")]
+
+genes_chr_foxi3 <- rownames(mrna_sel_f3)[mrna_sel_f3 == c("NLRP3")]
+genes_chr_kcnc2 <- rownames(mrna_sel_f3)[mrna_sel_f3 %in% c("BHLHE41", "SELPLG", "LPAR5", "TMEM119", "TMEM52B")]
+```
+
+
+```{r}
+
+# For ISM1
+
+results <- data.frame(CpG = character(), Subtype = character(), SpearmanRho = numeric(), PValue = numeric())
+
+for (cg in cg_ism1 ) {
+  
+  df <- data.frame(
+    Methylation = t(M2B(t(omics.list$Methylation)))[, cg],
+    Expression = omics.list$mRNA[, "ENSG00000101230"],
+    Subtype = metadata$Subtype
+  )
+  
+  df_lgg <- df[df$Subtype %in% c("ASTRO", "OLIGO"), ]
+  
+  for (sub in c("ASTRO", "OLIGO")) {
+    df_sub <- df_lgg[df_lgg$Subtype == sub, ]
+    
+    df_sub <- df_sub[complete.cases(df_sub), ]
+    
+    if (nrow(df_sub) > 2) {  
+      cor_test <- cor.test(df_sub$Methylation, df_sub$Expression, method = "spearman")
+      
+      results <- rbind(results, data.frame(
+        CpG = cg,
+        Subtype = sub,
+        SpearmanRho = cor_test$estimate,
+        PValue = cor_test$p.value
+      ))
+    }
+  }
+}
+
+
+```
+```{r}
+results
+```
+ENSG00000124140 "SLC12A5"
