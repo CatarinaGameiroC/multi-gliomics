@@ -1,0 +1,716 @@
+---
+title: "new_labels"
+output: pdf_document
+date: "2025-05-03"
+---
+
+
+
+
+## Load data
+```{r}
+
+metadata <- read.csv("DataSets/2_analysis/metadata.csv", row.names = 1)
+
+survival <- read.csv("DataSets/2_analysis/survival_data.csv", row.names = 1)
+
+mutations <- read.csv("DataSets/2_analysis/mutations.csv", row.names = 1)
+dna <- read.csv("DataSets/2_analysis/dna.csv", row.names = 1)
+mrna <- read.csv("DataSets/2_analysis/mrna.csv", row.names = 1)
+mirna <- read.csv("DataSets/2_analysis/mirna.csv", row.names = 1)
+
+
+info.methy <- read.csv("DataSets/processed_assays/info_methylation.csv", row.names = 1)
+info.mirna <- read.csv("DataSets/processed_assays/info_rna_mirna.csv", row.names = 1)
+info.mrna <- read.csv("DataSets/processed_assays/info_rna_coding.csv", row.names = 1)
+```
+
+
+```{r}
+omics.list <- list(Mutations = mutations, Methylation = dna, mRNA = mrna, miRNA = mirna)
+```
+
+
+```{r}
+factors_mofa <- as.matrix(read.csv("MOFA/output/factors_mofa.csv", row.names = 1))
+
+loadings_mofa <- list(
+  Mutations = as.matrix(read.csv("MOFA/output/loadings_mofa_mut.csv", row.names = 1)),
+  Methylation = as.matrix(read.csv("MOFA/output/loadings_mofa_dna.csv", row.names = 1)),
+  mRNA = as.matrix(read.csv("MOFA/output/loadings_mofa_mrna.csv", row.names = 1)),
+  miRNA = as.matrix(read.csv("MOFA/output/loadings_mofa_mirna.csv", row.names = 1))
+)
+```
+
+
+```{r}
+survival_omics <- as.matrix(read.csv("DataSets/2_analysis/survival_data.csv", row.names = 1))
+```
+
+
+
+## Analysis
+
+```{r}
+library(survival)
+library(survminer)
+```
+
+# Find the best number of clusters (3,4,5,6), based on p-value of log-rank test
+
+```{r}
+library("dplyr")
+
+res_l <- list()
+clust_l <- list()
+for (k in 3: 8) {  
+  
+set.seed(4)  # for reproducibility
+ 
+  res <- c()
+
+  for (r in 1: 30) {
+    strat_sample <- survival_omics %>%
+      tibble::rownames_to_column("SampleID") %>%
+      group_by(Status) %>%
+      sample_frac(size = 0.80) %>%
+      tibble::column_to_rownames("SampleID")
+
+
+    km_res <- kmeans(factors_mofa[rownames(strat_sample), c(1,2,3)], centers = k, nstart = 10)
+    
+    
+    surv_obj <- Surv(time = strat_sample[, "Time"] , 
+                     event = strat_sample[, "Status"])
+  
+    fit <- survfit(surv_obj ~ factor(km_res$cluster))
+    
+    logrank <- survdiff(surv_obj ~ factor(km_res$cluster))
+    
+    p_val <- logrank$pvalue
+    
+    res <- c(res, p_val)
+    
+  }
+  res_l[[as.character(k)]] <- res
+}
+```
+
+
+
+```{r}
+res_l_log10 <- sapply(res_l, function(x) -log10(x))
+
+
+df <- data.frame(res_l_log10)
+colnames(df) <- c(3,4,5,6,7,8)
+
+df_long <- df %>%
+  pivot_longer(
+    cols = everything()
+  )
+
+
+
+p <- ggplot(df_long, aes(x = name, y = value, fill = name)) +
+  geom_boxplot(fill = "#FF7F32") +
+  labs(x = "Number of Clusters", y = "-log10(p-value)") +
+  theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.position="none",
+      legend.text =  element_blank(), 
+      legend.title =  element_blank(), ,
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+
+
+ggsave(filename = paste0("search_labels/", "dist_logp_k", ".pdf"), plot = p, width = 10, height = 7, dpi = 300)
+```
+
+
+
+## K = 5
+
+# Plot the projection based on that assignment + Survival Curves of each cluster
+
+```{r}
+
+k <- 5
+
+set.seed(44)
+km_res <- kmeans(factors_mofa[,c(1,2,3)], centers = k, nstart = 10)
+
+```
+
+```{r}
+
+plot_proj_data <- data.frame(x = factors_mofa[,1], y  = factors_mofa[,3], color_by = factor(km_res$cluster,levels = 1:5, 
+                                  labels = paste("Cluster", 1:5)))
+
+
+my_colors <- brewer.pal(n = 5, name = "Dark2")
+p <- ggplot(plot_proj_data , aes(x=.data$x, y=.data$y, color=.data$color_by)) + 
+    geom_point(size=3.0) +
+    labs(x="Factor 1", y="Factor 3", color = "") +
+    scale_color_manual(values = my_colors) +
+     theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text =   element_text(size=rel(text_size), hjust=1, color='black'), 
+      legend.title =   element_text(size=rel(text_size), hjust=1, color='black'), 
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+
+ggsave(filename = paste0("search_labels/", "proj_k_5", ".pdf"), plot = p, width = 10, height = 7, dpi = 300)
+```
+
+
+```{r}
+library(scatterplot3d)
+scatterplot3d(factors_mofa[,1], factors_mofa[,2], factors_mofa[,3], color = colors[factor(km_res$cluster)], pch = 19)
+
+colors <- c("1" = "blue", "2" = "red", "3" = "green", "4"="orange", "5" = "purple")
+
+
+```
+
+```{r}
+library(plotly)
+plot_ly(x = ~factors_mofa[,1], y = ~factors_mofa[,2], z = ~factors_mofa[,3], 
+        color = factor(km_res$cluster), 
+        colors = c("blue", "red", "green","orange", "purple"),
+        type = "scatter3d", mode = "markers")
+
+```
+
+
+```{r}
+
+
+plot_data <- data.frame(
+  Time = survival_omics[["Time"]],
+  Status = survival_omics[["Status"]],
+  Cluster = factor(km_res$cluster,levels = 1:5, 
+                                  labels = paste("Cluster", 1:5))
+)
+
+
+surv_obj <- Surv(time = plot_data$Time, event = plot_data$Status)
+fit <- survfit(surv_obj ~ Cluster, data = plot_data)
+
+names(fit$strata) <- gsub("Cluster=", "", names(fit$strata))
+
+p <- ggsurvplot(
+  fit,
+  data = plot_data,
+  risk.table = F,
+  pval = F,
+  palette = "Dark2",
+  legend.title = "",
+  xlab = "Time (days)",
+  ylab = "Survival Probability"
+)
+
+p <- p$plot + theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    )
+
+ggsave(filename = paste0("search_labels/", "surv_curves_k_5", ".pdf"), plot = p, width = 10, height = 7, dpi = 300)
+```
+
+
+
+# Table with some information on the clusters and ground-truth labels
+
+```{r}
+metadata_clust <- metadata
+
+metadata_clust$Cluster <- factor(km_res$cluster,levels = 1:5, 
+                                  labels = paste("Cluster", 1:5))
+metadata_clust$IDH1 <- omics.list$Mutations[, "IDH1"]
+metadata_clust$EGFR <- omics.list$Mutations[, "EGFR"]
+metadata_clust$PTEN <- omics.list$Mutations[, "PTEN"]
+metadata_clust$TP53 <- omics.list$Mutations[, "TP53"]
+metadata_clust$PIK3CA <- omics.list$Mutations[, "PIK3CA"]
+
+cluster_summary <- metadata_clust %>%
+  group_by(Cluster) %>%
+  summarise(
+    n = n(),
+    AGE = round(mean(Age, na.rm = TRUE), 2),
+    MALE = round(mean(Gender == "Male", na.rm = TRUE) * 100,2),
+    OLIGO = sum(Subtype == "OLIGO", na.rm = TRUE),
+    ASTRO = sum(Subtype == "ASTRO", na.rm = TRUE),
+    GBM = sum(Subtype == "GBM", na.rm = TRUE),
+    DEAD = round(sum(Vital_Status == "Dead", na.rm = TRUE)/n * 100,2),
+    IDH1 = round(sum(IDH1 == 1, na.rm = TRUE)/n * 100,2),
+    PTEN = round(sum(PTEN == 1, na.rm = TRUE)/n * 100,2),
+    EGFR = round(sum(EGFR == 1, na.rm = TRUE)/n * 100,2),
+    TP53 = round(sum(TP53 == 1, na.rm = TRUE)/n * 100,2),
+    PIK3CA = round(sum(PIK3CA == 1, na.rm = TRUE)/n * 100,2)
+  )
+
+cluster_summary
+write.csv(cluster_summary, "search_labels/info_clust5.csv", row.names = TRUE)
+```
+
+The samples in cluster 4, which histological type do they have?
+```{r}
+classification <- as.matrix(read.csv("DataSets/SIMPLIFIED_CLASSIFICATION_TCGA_2016_2021.csv", row.names = 1))
+missing_samples <- setdiff(rownames(omics.list$Mutations),rownames(classification))
+new_entries <- matrix("unclassified", 
+                      nrow = length(missing_samples), 
+                      ncol = ncol(classification),
+                      dimnames = list(missing_samples, colnames(classification)))
+
+
+classification <- rbind(classification, new_entries)
+
+
+classification_1 <- classification[names(km_res$cluster)[km_res$cluster == 1], ]
+classification_2 <- classification[names(km_res$cluster)[km_res$cluster == 2], ]
+classification_3 <- classification[names(km_res$cluster)[km_res$cluster == 3], ]
+classification_4 <- classification[names(km_res$cluster)[km_res$cluster == 4], ]
+classification_5 <- classification[names(km_res$cluster)[km_res$cluster == 5], ]
+```
+
+```{r}
+table(classification_1[, "TCGA.histological.type"]) # mostly untreated primary (de novo) gbm
+table(classification_3[, "TCGA.histological.type"]) # mostly astrocytoma  and some untreated primary (de novo) gbm
+
+
+table(classification_4[, "TCGA.histological.type"])
+
+table(classification_2[, "TCGA.histological.type"]) 
+table(classification_5[, "TCGA.histological.type"])
+
+
+```
+
+Let's re-label:
+Cluster 1: GBM_1
+Cluster 3: GBM_3
+Cluster 2: ASTRO_2
+Cluster 5: OLIGO_5
+Cluster 4: MIX_LGG_4
+
+```{r}
+clust_labeled <- as.matrix(km_res$cluster)
+
+
+new_labels <- c(
+  "1" = "GBM_1",
+  "2" = "ASTRO_2",
+  "3" = "GBM_3",
+  "4" = "MIX_LGG_4",
+  "5" = "OLIGO_5"
+)
+
+
+clust_labeled_named <- new_labels[as.character(clust_labeled[, 1])]
+names(clust_labeled_named) <- rownames(clust_labeled)
+
+clust_labeled_named <- as.vector(clust_labeled_named)
+```
+
+
+
+# Repeat DGE  based on these groups 
+
+
+```{r}
+library("DESeq2")
+library("edgeR")
+
+
+mrna <- as.matrix(read.csv("DataSets/original_assays/assay_rna_coding.csv", row.names = 1))
+
+mrna <- t(mrna)
+
+keep <- rowSums(cpm(mrna) > 1) >= 5
+mrna <- mrna[keep,]
+
+mrna <- DGEList(counts = mrna)
+mrna <- normLibSizes(mrna, method = "TMM")
+
+patients <- rownames(omics.list$Mutations)
+
+# only keep the 318 patients
+mrna$samples <- mrna$samples[patients, ]
+mrna$counts <- mrna$counts[,patients]
+
+mrna$samples$group <- clust_labeled_named
+
+group <- factor(clust_labeled_named)
+
+# design matrix
+design <- model.matrix(~ 0 + group, data = mrna$samples)
+colnames(design) <- levels(group)
+design
+
+
+# dispersion
+mrna <- estimateDisp(mrna, design, robust=TRUE)
+mrna$common.dispersion
+
+
+# fit 
+fit <- glmQLFit(mrna, design, robust=TRUE)
+head(fit$coefficients)
+```
+
+
+```{r}
+con_1_2 <- makeContrasts(GBM_1 - ASTRO_2, levels=design)
+con_1_3 <- makeContrasts(GBM_1 - GBM_3, levels=design)
+con_1_4 <- makeContrasts(GBM_1  - MIX_LGG_4, levels=design)
+con_1_5 <- makeContrasts(GBM_1  - OLIGO_5, levels=design)
+
+con_2_3 <- makeContrasts(ASTRO_2 - GBM_3, levels=design)
+con_2_4 <- makeContrasts(ASTRO_2 - MIX_LGG_4, levels=design)
+con_2_5 <- makeContrasts(ASTRO_2  - OLIGO_5, levels=design)
+
+con_3_4 <- makeContrasts(GBM_3 - MIX_LGG_4, levels=design)
+con_3_5 <- makeContrasts(GBM_3 -  OLIGO_5, levels=design)
+
+con_4_5 <- makeContrasts(MIX_LGG_4 - OLIGO_5, levels=design)
+
+
+
+
+fit_1_2 <- glmQLFTest(fit, contrast=con_1_2)
+fit_1_3 <- glmQLFTest(fit, contrast=con_1_3)
+fit_1_4 <- glmQLFTest(fit, contrast=con_1_4)
+fit_1_5 <- glmQLFTest(fit, contrast=con_1_5)
+
+fit_2_3 <- glmQLFTest(fit, contrast=con_2_3)
+fit_2_4 <- glmQLFTest(fit, contrast=con_2_4)
+fit_2_5 <- glmQLFTest(fit, contrast=con_2_5)
+
+fit_3_4 <- glmQLFTest(fit, contrast=con_3_4)
+fit_3_5 <- glmQLFTest(fit, contrast=con_3_5)
+
+fit_4_5 <- glmQLFTest(fit, contrast=con_4_5)
+
+```
+ 
+
+ 
+ 
+Factor 1 genes
+```{r}
+fac_1_de <- matrix(data = NA, nrow = 5, ncol = 5, dimnames = list(new_labels, new_labels))
+
+for (i in 1:5){
+  for (j in (i+1):5){
+    contrast_str <- paste0(colnames(fac_1_de)[j], " - ", colnames(fac_1_de)[i])
+
+    contrast_matrix <- makeContrasts(contrasts = contrast_str, levels = design)
+
+    fit_rest <- glmQLFTest(fit, contrast=contrast_matrix)
+    fit_rest <- fit_rest$table[mrna_sel_f1_, ]
+    de_genes <- rownames(fit_rest)[abs(fit_rest$logFC) > 1 &
+      fit_rest$PValue <= 0.05
+    ]
+
+    fac_1_de[i, j] <- length(de_genes)
+  }
+}
+fac_1_de[lower.tri(fac_1_de)] <- t(fac_1_de)[lower.tri(fac_1_de)]
+
+```
+
+
+```{r}
+fac_2_de <- matrix(data = NA, nrow = 5, ncol = 5, dimnames = list(new_labels, new_labels))
+
+for (i in 1:5){
+  for (j in (i+1):5){
+    contrast_str <- paste0(colnames(fac_2_de)[j], " - ", colnames(fac_2_de)[i])
+
+    contrast_matrix <- makeContrasts(contrasts = contrast_str, levels = design)
+
+    fit_rest <- glmQLFTest(fit, contrast=contrast_matrix)
+    fit_rest <- fit_rest$table[mrna_sel_f2_, ]
+    de_genes <- rownames(fit_rest)[abs(fit_rest$logFC) > 1 &
+      fit_rest$PValue <= 0.05
+    ]
+
+    fac_2_de[i, j] <- length(de_genes)
+  }
+}
+fac_2_de[lower.tri(fac_2_de)] <- t(fac_2_de)[lower.tri(fac_2_de)]
+```
+
+```{r}
+fac_3_de <- matrix(data = NA, nrow = 5, ncol = 5, dimnames = list(new_labels, new_labels))
+
+for (i in 1:5){
+  for (j in (i+1):5){
+    contrast_str <- paste0(colnames(fac_3_de)[j], " - ", colnames(fac_3_de)[i])
+
+    contrast_matrix <- makeContrasts(contrasts = contrast_str, levels = design)
+
+    fit_rest <- glmQLFTest(fit, contrast=contrast_matrix)
+    fit_rest <- fit_rest$table[mrna_sel_f3_, ]
+    de_genes <- rownames(fit_rest)[abs(fit_rest$logFC) > 1 &
+      fit_rest$PValue <= 0.05
+    ]
+
+    fac_3_de[i, j] <- length(de_genes)
+  }
+}
+fac_3_de[lower.tri(fac_3_de)] <- t(fac_3_de)[lower.tri(fac_3_de)]
+```
+
+```{r}
+fac_1_de
+fac_2_de # this well separates the mix_lgg from all of the others - the question remains! 
+fac_3_de # 
+```
+- GBM_1 seems more agressive than GBM_3 since: worst survival, older patients, histologicla type of mostly untreated primary (de novo) gbm;  they differ in terms of expression of factor 2 genes (they are up-regulated in GBM-3)
+  is GBM-3 the neural subtype? this genes are related to nueral system, one of the genes were reprted as being this subtype in 
+  who-gbm4subtypes
+
+
+- Factor 1 genes separates the GBM groups from the others
+- GBM_3 is more similar to LGG group as indicated by factor 2 table (the one that is astro or oligo, because not the mixed lgg)
+
+- Factor 2 gens are crucial for MIX_LGG_4 to disintguish from all groups, this is actually a profile, less agresive than ASTRO_2 but more agressive than OLIGO_5; they are up-regulated compared to all of the groups.
+
+are factor 2 genes agressive in oligo and less agressive in astro? 
+
+
+
+
+```{r}
+# MIX_LGG_4 -1, GBM_1 1
+fit_1_4$table[mrna_sel_f2_, ] #logFC negative: genes up regulated in mix-lgg
+
+# MIX_LGG_4 -1, ASTRO_2 1
+fit_2_4$table[mrna_sel_f2_, ] #logFC negative: genes up regulated in mix-lgg
+
+# MIX_LGG_4 -1, GBM_3 1
+fit_3_4$table[mrna_sel_f2_, ] #logFC negative: genes up regulated in mix-lgg
+
+
+# MIX_LGG_4 1, OLIGO_5 -1
+fit_4_5$table[mrna_sel_f2_, ] #logFC positive : genes up regulated in mix-lgg
+
+
+
+fit_1_3$table[mrna_sel_f2_, ]
+con_1_3
+```
+
+
+- factor 3 genes may be common to GBM groups and astro. but well separates astro from oligo as seen before
+
+## DMP
+ 
+```{r}
+library("ChAMP")
+
+dna <- as.matrix(read.csv("DataSets/processed_assays/assay_methylation.csv", row.names = 1))
+dna <-  dna[rownames(omics.list$Mutations), ]
+
+
+dna_beta <- t(M2B(dna))
+
+unique(clust_labeled_named)
+
+```
+
+
+```{r}
+fac_1_de_dna <- matrix(data = NA, nrow = 5, ncol = 5, dimnames = list(new_labels, new_labels))
+
+for (i in 1:5){
+  for (j in (i+1):5){
+    contrast_str <- c(colnames(fac_1_de_dna)[j], colnames(fac_1_de_dna)[i])
+
+    res <- champ.DMP(beta = dna_beta,
+                              pheno = clust_labeled_named,
+                              compare.group = contrast_str,
+                              adjPVal = 0.05 ,
+                              adjust.method = "BH",
+                              arraytype = "450K")
+    res <- res[[1]]
+    res <- res[methy_sel_f1, ]
+    
+    de_probes <- rownames(res)[abs(res$logFC) > 0.2 &
+      res$adj.P.Val <= 0.05
+    ]
+
+    fac_1_de_dna[i, j] <- length(de_probes)
+  }
+}
+fac_1_de_dna[lower.tri(fac_1_de_dna)] <- t(fac_1_de_dna)[lower.tri(fac_1_de_dna)]
+```
+
+
+
+```{r}
+fac_3_de_dna <- matrix(data = NA, nrow = 5, ncol = 5, dimnames = list(new_labels, new_labels))
+
+for (i in 1:5){
+  for (j in (i+1):5){
+    contrast_str <- c(colnames(fac_3_de_dna)[j], colnames(fac_3_de_dna)[i])
+
+    res <- champ.DMP(beta = dna_beta,
+                              pheno = clust_labeled_named,
+                              compare.group = contrast_str,
+                              adjPVal = 0.05 ,
+                              adjust.method = "BH",
+                              arraytype = "450K")
+    res <- res[[1]]
+    res <- res[methy_sel_f3, ]
+    
+    de_probes <- rownames(res)[abs(res$logFC) > 0.2 &
+      res$adj.P.Val <= 0.05
+    ]
+
+    fac_3_de_dna[i, j] <- length(de_probes)
+  }
+}
+fac_3_de_dna[lower.tri(fac_3_de_dna)] <- t(fac_3_de_dna)[lower.tri(fac_3_de_dna)]
+```
+
+ 
+
+## K = 3
+
+# Plot the projection based on that assignment + Survival Curves of each cluster
+
+```{r}
+
+k2 <- 3
+
+set.seed(64)
+km_res2 <- kmeans(factors_mofa[,c(1,2,3)], centers = k2, nstart = 10)
+
+```
+
+```{r}
+
+plot_proj_data <- data.frame(x = factors_mofa[,1], y  = factors_mofa[,3], color_by = factor(km_res2$cluster))
+
+ggplot(plot_proj_data , aes(x=.data$x, y=.data$y, color=.data$color_by)) + 
+    geom_point(size=3.0) +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+     panel.grid.minor = element_blank(), 
+    panel.border = element_rect(color = "black", fill = NA, size = 0.8))
+
+
+```
+
+
+
+```{r}
+
+
+
+plot_data <- data.frame(
+  Time = survival_omics[["Time"]],
+  Status = survival_omics[["Status"]],
+  Cluster = factor(km_res2$cluster,levels = 1:3, 
+                                  labels = paste("Cluster", 1:3))
+)
+
+
+surv_obj <- Surv(time = plot_data$Time, event = plot_data$Status)
+fit <- survfit(surv_obj ~ Cluster, data = plot_data)
+
+names(fit$strata) <- gsub("Cluster=", "", names(fit$strata))
+
+p <- ggsurvplot(
+  fit,
+  data = plot_data,
+  risk.table = F,
+  pval = F,
+  palette = "Dark2",
+  legend.title = "",
+  xlab = "Time (days)",
+  ylab = "Survival Probability"
+)
+
+p <- p$plot + theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y=element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    )
+
+ggsave(filename = paste0("search_labels/", "surv_curves_k_3", ".pdf"), plot = p, width = 10, height = 7, dpi = 300)
+
+```
+
+
+```{r}
+metadata_clust2 <- metadata
+
+metadata_clust2$Cluster <- factor(km_res2$cluster)
+metadata_clust2$IDH1 <- omics.list$Mutations[, "IDH1"]
+metadata_clust2$EGFR <- omics.list$Mutations[, "EGFR"]
+metadata_clust2$PTEN <- omics.list$Mutations[, "PTEN"]
+metadata_clust2$TP53 <- omics.list$Mutations[, "TP53"]
+
+cluster_summary2 <- metadata_clust2 %>%
+  group_by(Cluster) %>%
+  summarise(
+    n = n(),
+    AGE = mean(Age, na.rm = TRUE),
+    MALE = mean(Gender == "Male", na.rm = TRUE) * 100,
+    OLIGO = sum(Subtype == "OLIGO", na.rm = TRUE),
+    ASTRO = sum(Subtype == "ASTRO", na.rm = TRUE),
+    GBM = sum(Subtype == "GBM", na.rm = TRUE),
+    DEAD = sum(Vital_Status == 1, na.rm = TRUE)/n * 100,
+    IDH1 = sum(IDH1 == 1, na.rm = TRUE)/n * 100,
+    PTEN = sum(PTEN == 1, na.rm = TRUE)/n * 100,
+    EGFR = sum(EGFR == 1, na.rm = TRUE)/n * 100,
+    TP53 = sum(TP53 == 1, na.rm = TRUE)/n * 100
+  )
+
+cluster_summary2
+```
+
+```{r}
+table(classification[names(km_res2$cluster)[km_res2$cluster == 3], "TCGA.histological.type"])
+table(classification[names(km_res2$cluster)[km_res2$cluster == 1], "TCGA.histological.type"])
+```
+
+
+
+
+
+
+
+
