@@ -1,0 +1,1291 @@
+---
+title: "sGCCA"
+output: html_document
+date: "2025-02-21"
+---
+
+
+
+## Load libraries
+```{r, results = FALSE, message = FALSE, warning = FALSE}
+
+library("RGCCA")
+```
+
+
+## Load functions
+```{r}
+source("../enrichment.R")
+```
+
+
+```{r}
+
+cor_factors_metadata <- function(factors_matrix, covariates) {
+  
+  if (any(!covariates %in% names(metadata))) stop("Covariate names not in the available metadata.")
+  
+  results_list <- list()
+  
+  for (covariate in covariates) {
+    
+    variable <- metadata[[covariate]]
+    test_results <- matrix(NA, nrow = ncol(factors_matrix), ncol = 2)  
+    rownames(test_results) <- colnames(factors_matrix)
+    colnames(test_results) <- c("Effect Size", "P-value")
+    
+    if (is.numeric(variable)) {  
+      # **Spearman correlation for continuous variables (Age)**
+      for (i in 1:ncol(factors_matrix)) {
+        test <- cor.test(factors_matrix[, i], variable, method = "spearman")
+        test_results[i, ] <- c(test$estimate, test$p.value)
+      }
+      
+    } else if (length(unique(variable)) == 2) {  
+      # **Wilcoxon Rank-Sum Test for binary variables**
+      for (i in 1:ncol(factors_matrix)) {
+        test <- wilcox.test(factors_matrix[, i] ~ variable)
+        test_results[i, ] <- c(NA, test$p.value)  
+      }
+      
+    } else {  
+      # **Kruskal–Wallis Test for multi-class categorical variables**
+      for (i in 1:ncol(factors_matrix)) {
+        test <- kruskal.test(factors_matrix[, i] ~ variable)
+        test_results[i, ] <- c(NA, test$p.value)  
+      }
+    }
+    
+    results_list[[covariate]] <- test_results
+  }
+  
+  return(results_list)  
+}
+
+
+plot_cor <- function(output_cor_factors_metadata) {
+
+ 
+  plot_data <- do.call(rbind, lapply(names(output_cor_factors_metadata), function(var) {
+    df <- as.data.frame(output_cor_factors_metadata[[var]])
+    df$Factor <- rownames(df)
+    df$Covariate <- var
+    df
+  }))
+  
+  plot_data$Covariate <- gsub("Vital_Status", "Vital Status", plot_data$Covariate)
+ 
+  plot_data <- plot_data[, c("Factor", "Covariate", "P-value")]
+  plot_data <- melt(plot_data, id.vars = c("Factor", "Covariate"))
+  
+  
+  plot_data$value <- -log10(plot_data$value)  
+  plot_data$Significance <- cut(plot_data$value,
+                                breaks = c(-Inf, -log10(0.05), -log10(0.01), -log10(0.001), Inf),
+                                labels = c("", "*", "**", "***"))
+  
+  
+
+  plot <- ggplot(plot_data, aes(x = Covariate, y = Factor, fill = value)) +
+    geom_tile() +
+    geom_text(aes(label = Significance), color = "black", size = 6) +  # Significance markers
+    scale_fill_gradient(low = "white", high = "red", name = "-log10(p)") +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    )+
+    labs(x = "", y = "", title = "", )
+  
+  return (plot)
+}
+
+
+
+
+```
+
+
+```{r}
+
+
+  
+plot_biplot <- function(factors_matrix, loadings_matrix, color_by = NULL, shape_by = NULL, show_arrows = FALSE, comps = c(1, 2),
+                        color_legend = NULL, shape_legend = NULL) {
+  
+  df <- data.frame(
+    Comp1 = factors_matrix[, comps[1]],
+    Comp2 = factors_matrix[, comps[2]]
+  )
+  
+  if (!is.null(color_by)) {
+    df$Color <- color_by
+  }
+  
+  if (!is.null(shape_by)) {
+    df$Shape <- shape_by
+  }
+  
+  text_size <- 2
+  
+  # Base plot
+  p <- ggplot(df, aes(x = Comp1, y = Comp2))
+  
+  # Add points conditionally
+  if (!is.null(color_by) & !is.null(shape_by)) {
+    p <- p + geom_point(aes(color = Color, shape = Shape), size = 2, alpha=1) +
+    labs(color = color_legend, shape = shape_legend)
+  } else if (!is.null(color_by)) {
+    p <- p + geom_point(aes(color = Color),  size = 2, alpha=1) +
+      labs(color = color_legend)
+  } else if (!is.null(shape_by)) {
+    p <- p + geom_point(aes(shape = Shape),  size = 2, alpha=1) +
+      labs(shape = shape_legend)
+  } else {
+    p <- p + geom_point(size = 2)
+  }
+  
+  # Add theme and labels
+  p <- p +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+      panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) +
+    labs(
+      x = paste0("Component ", comps[1]),
+      y = paste0("Component ", comps[2])
+    )
+  
+  if (!is.null(color_by)) {
+    if (is.numeric(color_by)) {
+      
+      p <- p + scale_color_gradientn(
+        colours = c("darkgreen", "white", "darkred"),
+        name = color_legend
+      )
+    } 
+  }
+  
+  # Add arrows for loadings if requested
+  if (show_arrows) {
+    load_df <- data.frame(
+      xend = loadings_matrix[, comps[1]],
+      yend = loadings_matrix[, comps[2]],
+      name = rownames(loadings_matrix)
+    )
+    
+    p <- p + 
+      geom_segment(data = load_df, aes(x = 0, y = 0, xend = xend, yend = yend),
+                   arrow = arrow(length = unit(0.2, "cm")), 
+                   color = "black", 
+                   inherit.aes = FALSE) +
+      geom_text(
+        data = load_df,
+        aes(x = xend, y = yend, label = name),
+        hjust = 0.5, vjust = -0.7, size = 3
+      ) 
+  }
+  
+  return(p)
+}
+```
+
+
+## Load Data
+
+```{r}
+metadata <- read.csv("../DataSets/2_analysis/metadata.csv", row.names = 1)
+
+
+mutations <- read.csv("../DataSets/2_analysis/mutations.csv", row.names = 1)
+dna <- read.csv("../DataSets/2_analysis/dna.csv", row.names = 1)
+mrna <- read.csv("../DataSets/2_analysis/mrna.csv", row.names = 1)
+mirna <- read.csv("../DataSets/2_analysis/mirna.csv", row.names = 1)
+
+
+info.methy <- read.csv("../DataSets/processed_assays/info_methylation.csv", row.names = 1)
+info.mirna <- read.csv("../DataSets/processed_assays/info_rna_mirna.csv", row.names = 1)
+info.mrna <- read.csv("../DataSets/processed_assays/info_rna_coding.csv", row.names = 1)
+```
+
+
+
+```{r}
+omics.list <- list(Mutations = mutations, Methylation = dna, mRNA = mrna, miRNA = mirna)
+```
+
+
+  
+
+
+## Method
+
+# RGCCA (Regularized Generalized Canonical Correlation Analysis)
+```{r}
+available_methods()
+```
+
+For RGCCA, three hyper-parameters to be defined:
+  - Design matrix: how the blocks are connected (mRNA, miRNA, mutations and DNA Methylation). How estimate this relation?
+      . in the DIABLO's paper, the optimal design matrix is 0.1
+      . how get the connection between omics by the data? Or based on biology? Maybe the default is good 
+  - Tau, between 0 and 1: 0 will maximize the correlation and 1 the covariance [look at the objective function] . What is a good trade-off?
+    if we want sRGCCA, this is 1
+
+  - Sparsity: is equal to one in sRGCCA (we want this!!!)
+  
+  - Number of composite variables desired: PERMUTATION?
+
+We also need to choose the scheme, the 'g' function. We can choose from 
+  1) horst = identity function
+  2) centroid = absolute function
+  3) ..
+  I guess that the horst scheme penalizes negative structural correlation between block components, while the centroid scheme allows enable two components to be negatively correlated. I think that in our case, since we just want to idenitfy driver genes of gliomas/molecular profiles, I will allow that the components may be negative correlated.
+  
+  
+Other thing to think about is how this will handle the mutations omics, because of its binary nature. It will the scale_block be enough? [Scale block will divide the omics by some norm: or the largest eigenvalue, frobenius norm, ...]
+If cannot handles well, maybe I could use DIABLO (supervised extension of RGCAA) with the three groups as classes. I could also use RGCCA with a special design matrix, ensuring all of the blocks were connected with 1 to this assay (super_block), idk. 
+  
+  
+This is sRGCCA (RGCCA formula + the constraint that ||a_j||_1 <= sparsity).
+  - sparsity? This will translate in if an omics has p variables, the loadings vectors of this omics, besided having unit norm, their absolute sum will be less or equal than sqrt(p): |a_1| + ... + |a_j| <= sqrt(p), which for our case will mean
+        DNA/mRNA: ~90 non-zero
+        Mutations/miRNA: ~30 non-zero
+  - tau? Setting to 1 (default) will emphasis on large variance of the components (look at the constraint) and the resulting components may prioritize the block's variance over the correlations between blocks. The optimization function should be maximizing the |covariance| between components of different blocks, by ensuring that the loadings have unit norm, or, that the covariance intra-block is the identity, meaning that the components within the block are "independent". 
+  Are we okay with this? Components capture a larger variance of the blocks, and are still interested in accounting for block correlations, but  the variance will slightly dominating over the correlation. And our goal is to find relations betweeen the blocks.
+```{r}
+run_sGCCA <- function(X, num.factors = NULL){
+  # using design matrix as default
+  
+  time_taken <- system.time({
+    
+    if (is.null(num.factors)){
+      
+      # number of components to test (we assume the same for every omics)
+      ncomp_test <- matrix(rep(seq(2, 8), length(X)), byrow = FALSE, ncol = length(X))
+      num.factors <- rgcca_permutation(blocks = X, method = "sgcca", scheme = "centroid",
+                                       par_type = "ncomp", par_value = ncomp_test,
+                                       scale_block = TRUE, scale = FALSE)$best_params
+    }
+    
+    # the constraint will be ||a||_1 < s * sqrt(number of features)
+    # we assume the same for every omics, since it takes into account the numebr of features
+    #s_test <-  matrix(rep(c(0.2, 0.5, 0.8), length(X)), byrow = FALSE, ncol = length(X))
+    #s_test <-  matrix(rep(c(0.05, 0.1, 0.15, 0.2, 0.25, 0.3), each = length(X)), byrow = TRUE, ncol = length(X))
+    
+    
+    #sparsity_opt <- rgcca_permutation(blocks = X, method = "sgcca", scheme = "centroid",
+                                       #par_type = "sparsity", par_value = s_test,
+                                       #ncomp = num.factors, scale_block = TRUE, scale = FALSE)$best_params
+    
+    sparsity_opt <- 0.15
+    sgcca <- rgcca(blocks = X, method = "sgcca", scheme = "centroid",
+                  ncomp = num.factors, sparsity = sparsity_opt,
+                  scale_block = TRUE, scale = FALSE)
+    
+    factors <- sgcca$Y 
+  
+    loadings <- list()
+    for (j in 1: length(X)){
+      loadings[[j]] <- as.matrix(sgcca$a[[j]])
+      colnames(loadings[[j]]) <- colnames(factors[[j]])
+    }
+    names(loadings) <- names(factors)
+    result <- list(Z = factors, W = loadings, model_output = sgcca)
+  })
+  
+  result$time_taken <- time_taken["elapsed"]
+  return (result)
+}
+```
+
+
+
+
+
+# Run the model 
+```{r}
+out_sgcca <- run_sGCCA(omics.list) 
+```
+
+```{r}
+model_sgcca <- out_sgcca$model_output
+```
+
+
+```{r}
+print(summary(model_sgcca))
+print(model_sgcca)
+```
+
+
+```{r}
+length(which(out_sgcca$W$mRNA[,1] == 0))
+length(which(out_sgcca$W$mRNA[,1] != 0))
+```
+
+```{r}
+
+dim(out_sgcca$Z$Mutations)
+```
+
+# Another model
+```{r}
+out_sgcca2 <- run_sGCCA(omics.list, num.factors = 3) 
+```
+
+```{r}
+model_sgcca2 <- out_sgcca2$model_output
+factors_sgcca <- out_sgcca2$Z
+loadings_sgcca <- out_sgcca2$W
+```
+
+
+```{r}
+print(summary(model_sgcca2))
+print(model_sgcca2)
+```
+
+
+
+
+
+```{r}
+which(loadings_sgcca$Mutations[, 1] != 0 & loadings_sgcca$Mutations[, 2] != 0 & loadings_sgcca$Mutations[, 3] != 0)
+which(loadings_sgcca$Methylation[, 2] != 0 & loadings_sgcca$Methylation[, 3] != 0 & loadings_sgcca$Methylation[, 3] != 0)
+which(loadings_sgcca$mRNA[, 1] != 0 & loadings_sgcca$mRNA[, 2] != 0 & loadings_sgcca$mRNA[, 3] != 0)
+which(loadings_sgcca$miRNA[, 1] != 0 & loadings_sgcca$miRNA[, 2] != 0 & loadings_sgcca$miRNA[, 3] != 0)
+```
+
+
+It seems that correlation is the one being "maximized", maybe what i said previously does not influence .
+```{r}
+
+diag(cor(factors_sgcca$Mutations, factors_sgcca$Methylation))
+diag(cor(factors_sgcca$Mutations, factors_sgcca$mRNA))
+diag(cor(factors_sgcca$Mutations, factors_sgcca$miRNA))
+
+
+diag(cor(factors_sgcca$Methylation, factors_sgcca$mRNA))
+diag(cor(factors_sgcca$Methylation, factors_sgcca$miRNA))
+
+
+diag(cor(factors_sgcca$mRNA, factors_sgcca$miRNA))
+
+
+
+```
+
+According to this, all of the components are postively correlated.
+This is useful. Sometimes, is useful to pick just one factors matrix. 
+
+```{r}
+
+ df_AVE <- function(x) {
+    AVE <- x$AVE$AVE_X_cor
+    df <- do.call(rbind, lapply(names(AVE), function(n) {
+      data.frame(
+        AVE = round(100 * AVE[[n]], digits = 1),
+        block = n,
+        comp = as.factor(seq(AVE[[n]]))
+      )
+    }))
+    df$label <- df$AVE
+    df$label[df$AVE == 0] <- ""
+    return(df)
+  }
+
+df <- df_AVE(model_sgcca2)
+colnames(df)[3] <- "Comp"
+
+text_size <- 2
+
+p <- ggplot(df, aes(x = .data$AVE, y = .data$block, fill = .data$Comp)) +
+  geom_bar(
+    position = position_stack(reverse = T), stat = "identity") +
+  stat_identity(
+    geom = "text", color = "black", size = 5,
+    aes(label = .data$label),
+    position = position_stack(reverse = TRUE, vjust = 0.5)
+  ) +
+  labs(title = "", x = "", y = "") + 
+  scale_fill_manual(values = brewer.pal(n = 3, name = "Oranges")) +
+   theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+       legend.title = element_text(size = rel(text_size), color = 'black'),
+     panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) 
+p
+
+ggsave(filename = "results/variance.pdf", p,  width = 14, height = 7)
+
+```
+
+
+
+
+MOFA explains better than RGCCA, but the number of components is not the same and the measure is different! 
+
+
+- Component 1: capturing some co-variation between all of the assays.
+- Component 2: captures a significant co-variance of the mRNA assay,  DNA Methylation and mutations
+- Component 3: captures mRNA, methylation and miRNA
+
+
+  
+```{r}
+
+colnames(factors_sgcca$miRNA) <- c("Comp 1", "Comp 2", "Comp 3")
+colnames(factors_sgcca$Methylation) <- c("Comp 1", "Comp 2", "Comp 3")
+
+
+cor_sgcca <- cor_factors_metadata(factors_sgcca$miRNA, c("Age", "Gender", "Vital_Status", "Type", "Subtype"))
+
+
+p <- plot_cor(cor_sgcca)
+ggsave(filename = "results/cor_mirna.pdf", plot = p, width = 8, height = 6)
+p
+rm(p)
+```
+1st component seems to be correlated with the grade (GBM, LGG). 
+2nd  it is shownig a very very slight correlation with Type, but it is not 
+
+
+
+
+```{r}
+plot(model_sgcca2, type = "sample", block = 1, comp = c(1, 2), show_sample_names = F, sample_shapes = 1, cex = 1.5,
+     response = metadata$Subtype)
+plot(model_sgcca2, type = "sample", block = 1, comp = c(1, 2), show_sample_names = F, sample_shapes = 1, cex = 1.5,
+     response = factors_sgcca$Mutations[,3])
+
+plot(model_sgcca2, type = "sample", block = 2, comp = c(1,2), show_sample_names = F, sample_shapes = 1, cex = 1.5,
+     response = metadata$Subtype)
+plot(model_sgcca2, type = "sample", block = 2, comp = c(1,2), show_sample_names = F, sample_shapes = 1, cex = 1.5,
+     response = factors_sgcca$Methylation[,3])
+
+
+plot(model_sgcca2, type = "sample", block = 3, comp = c(1, 2), show_sample_names = F, sample_shapes = 1, cex = 1.5,
+     response = metadata$Subtype)
+plot(model_sgcca2, type = "sample", block = 3, comp = c(1, 2), show_sample_names = F, sample_shapes = 1, cex = 1.5,
+     response = factors_sgcca$mRNA[,3])
+
+
+plot(model_sgcca2, type = "sample", block = 4, comp = c(1, 2), show_sample_names = F, sample_shapes = 1, cex = 1.5,
+     response = metadata$Subtype)
+plot(model_sgcca2, type = "sample", block = 4, comp = c(1, 2), show_sample_names = F, sample_shapes = 1, cex = 1.5,
+     response = factors_sgcca$miRNA[,3])
+```
+
+```{r}
+plot_roc_auc <- function(factors_matrix, class_column) {
+
+  
+
+  real_classes <- as.factor(class_column)
+  unique_classes <- levels(real_classes)
+  num_components <- ncol(factors_matrix)
+  
+
+  auc_results <- data.frame(
+    Component = numeric(),
+    Class = character(),
+    AUC = numeric()
+  )
+  
+
+  for (comp in seq_len(num_components)) {
+    for (class in unique_classes) {
+
+      binary_labels <- ifelse(real_classes == class, 1, 0)
+      
+
+      roc_obj <- roc(binary_labels, factors_matrix[, comp], quiet = TRUE)
+      auc_value <- auc(roc_obj)
+      
+
+      auc_results <- rbind(
+        auc_results,
+        data.frame(Component = paste0("Comp ", comp), Subtype = class, AUC = auc_value)
+      )
+    }
+  }
+  
+
+  ggplot(auc_results, aes(x = Component, y = AUC, fill = Subtype)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = "",
+         x = "", y = "AUC",
+         fill = "Subtype") +
+    theme(
+      axis.text.y = element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.text.x = element_text(size=rel(text_size), vjust=0.5, color='black'),
+      axis.title.y= element_text(size=rel(text_size), hjust=1, color='black'),
+      axis.title.x=element_text(size=rel(text_size), vjust=1, color='black'),
+      legend.text = element_text(size = rel(text_size), color = 'black'),
+      legend.title = element_text(size = rel(text_size), color = 'black'),
+     panel.grid.minor = element_blank(), 
+      panel.border = element_rect(color = "black", fill = NA, size = 0.8),
+      panel.background = element_blank(),
+    ) + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+
+```{r}
+text_size <- 2
+p <- plot_roc_auc(factors_sgcca$mRNA, metadata$Subtype)
+ggsave(filename = paste0("results/", "auc", ".pdf"), plot = p, width = 8, height = 6, dpi = 300)
+```
+
+Component 2 is separating the samples with positive component 1 in two groups, in mRNA and DNA Methylation. Are they the same as in MOFA?
+Mutations is very well separated. What mutations are driving each group?
+```{r}
+plot(model_sgcca2, block = 3, comp = c(1,2), type = "biplot", show_sample_names = F, show_arrows = T)
+
+
+plot(model_sgcca2, block = 1, comp = c(1,2), type = "biplot", show_sample_names = F, show_arrows = T, response =  metadata$Subtype)
+
+
+
+
+plot(model_sgcca2, block = 3, comp = c(1,2), type = "sample", show_sample_names = F, show_arrows = F, response =metadata$Subtype)
+```
+These seems the same groups as in MOFA, but the component 2 is the inverse. 
+
+
+
+```{r}
+
+p1 <- plot_biplot(factors_sgcca$Mutations, loadings_sgcca$Mutations, color_by = metadata$Subtype, show_arrows = T, comps = c(1, 2),
+            color_legend = "Subtype")
+
+p1
+ggsave(filename = "results/mutations_proj.pdf", p1, width = 7, height = 4)
+
+p2 <- plot_biplot(factors_sgcca$mRNA, loadings_sgcca$mRNA, color_by = metadata$Subtype, show_arrows = F, comps = c(1, 2),
+            color_legend = "Subtype")
+p2
+ggsave(filename = "results/mrna_proj.pdf", p2, width = 7, height = 4)
+
+
+p3 <- plot_biplot(factors_sgcca$Methylation, loadings_sgcca$Methylation, color_by = metadata$Subtype, show_arrows = F, comps = c(1, 2),
+            color_legend = "Subtype")
+p3
+ggsave(filename = "results/methy_proj.pdf", p3, width = 7, height = 4)
+
+
+p4 <- plot_biplot(factors_sgcca$mRNA, loadings_sgcca$mRNA, shape_by = metadata$Subtype, 
+            color_by = factors_sgcca$mRNA[,3], show_arrows = F, comps = c(1, 2),
+            color_legend = "Component 3", shape_legend = "Subtype") 
+p4 <- p4 + geom_vline(xintercept=0, linetype="dashed") + 
+  geom_segment(aes(x = min(factors_sgcca$mRNA[,1]), xend = 0, y = 0, yend = 0), linetype = "dashed")
+
+p4
+ggsave(filename = "results/c1_c2_c3.pdf", p4, width = 7, height = 4)
+```
+
+
+```{r}
+plot(model_sgcca2, block = 1, comp = c(1,2), type = "biplot", show_sample_names = F,show_arrows = F, repel = F)
+```
+This is a good way to see that the features selected by one component are not selected by the others.
+```{r}
+out_sgcca2$W$mRNA["ENSG00000108591", ]
+out_sgcca2$W$mRNA["ENSG00000131080", ]
+
+info.rna.coding["ENSG00000108591", "gene_name"]
+info.rna.coding["ENSG00000131080", "gene_name"]
+```
+Estes estão a ser selecionados por c2 
+
+
+```{r}
+plot(model_sgcca2, block = 3, comp = c(1,2), type = "biplot", show_sample_names = F,show_arrows = F, repel = F)
+```
+Why are the features of DNA Methylation not appearing?
+
+
+```{r}
+intersect(rownames(out_sgcca2$W$DNAMethylation)[out_sgcca2$W$DNAMethylation[,1] > 0], rownames(out_sgcca2$W$DNAMethylation)[out_sgcca2$W$DNAMethylation[,2] > 0])
+```
+
+Weights = feature contribution to component
+Loading = feature association with component
+
+
+MUTATIONS
+```{r}
+
+plot(model_sgcca2, block = 1, comp = 1, type = "weights", n_mark = 30)
+plot(model_sgcca2, block = 1, comp = 2, type = "weights", n_mark = 30)
+```
+
+
+```{r}
+
+mutations_sel_c1_pos <- c("IDH1")
+mutations_sel_c1_neg <- c("PTEN", "EGFR")
+
+mutations_sel_c2_pos <- c("CIC", "NOTCH1", "FUBP1")
+mutations_sel_c2_neg <- c("ATRX", "TP53")
+```
+
+
+
+
+DNA Methylation
+```{r}
+a <- plot(model_sgcca2, block = 2, comp = 1, type = "weights", n_mark = 30)
+b <- plot(model_sgcca2, block = 2, comp = 3, type = "weights", n_mark = 30)
+```
+
+```{r}
+methy_sel_c1_top30 <- as.vector(a$data$y)
+methy_sel_c2_top30 <- as.vector(b$data$y)
+  
+methy_sel_c1 <- names(which(model_sgcca2$a$Methylation[,1] != 0)) # all negative
+sort(table(info.methy[methy_sel_c1, "gene"]), decreasing = T)
+
+methy_sel_c2 <- names(which(model_sgcca2$a$Methylation[,2] != 0))
+sort(table(info.methy[methy_sel_c2, "gene"]), decreasing = T)
+```
+
+
+
+```{r}
+length(intersect(methy_sel_f1, methy_sel_c1))
+length(intersect(methy_sel_f3, methy_sel_c2))
+```
+
+```{r}
+install.packages("ggVennDiagram")
+library(ggVennDiagram)
+```
+
+```{r}
+venn_list1 <- list(F1 = methy_sel_f1, C1 = methy_sel_c1)
+
+ggVennDiagram(venn_list1) +
+  coord_flip() + 
+  theme_void()
+```
+
+
+
+```{r}
+
+sort(table(info.methy[methy_sel_c1, "gene"]))
+sort(table(info.methy[methy_sel_c2, "gene"]))
+```
+```{r}
+enrich_methy_c1 <- run_methy_gsea_comp(methy_sel_c1, 
+                                       background_vector = colnames(omics.list$Methylation), promoter = FALSE, 
+                                       alpha = 0.05,  filename = NULL)
+
+enrich_methy_c1_prom <- run_methy_gsea_comp(methy_sel_c1, 
+                                       background_vector = colnames(omics.list$Methylation), promoter = T, 
+                                       alpha = 0.05,  filename = NULL)
+
+enrich_methy_c2 <- run_methy_gsea_comp(methy_sel_c2, 
+                                       background_vector = colnames(omics.list$Methylation), promoter = FALSE, 
+                                       alpha = 0.05,  filename = NULL)
+
+enrich_methy_c2_prom <- run_methy_gsea_comp(methy_sel_c2, 
+                                       background_vector = colnames(omics.list$Methylation), promoter = T, 
+                                       alpha = 0.05, filename = NULL)
+```
+
+
+```{r}
+
+enrich_methy_c1
+enrich_methy_c1_prom
+enrich_methy_c2
+enrich_methy_c2_prom
+
+
+plot_methy_gsea(enrich_methy_c1, sign = "all",
+                max.pathways = 15, 
+                filename = "enrich_methy_c1", text_size = 2.0, 
+                dot_size = 5.0,
+                alpha = 0.05)
+
+plot_methy_gsea(enrich_methy_c1_prom, sign = "all",
+                max.pathways = 15, 
+                filename = "enrich_methy_c1_prom", text_size = 2.0, 
+                dot_size = 5.0,
+                alpha = 0.05)
+
+
+plot_methy_gsea(enrich_methy_c2, sign = "all",
+                max.pathways = 15, 
+                filename = "enrich_methy_c2", text_size = 2.0, 
+                dot_size = 5.0,
+                alpha = 0.05)
+
+plot_methy_gsea(enrich_methy_c2_prom, sign = "all",
+                max.pathways = 15, 
+                filename = "enrich_methy_c2_prom", text_size = 2.0, 
+                dot_size = 5.0,
+                alpha = 0.05)
+
+
+
+```
+
+```{r}
+go_2_reac <- read.csv("../DataSets/Pathways2GoTerms_human.txt", sep = "\t", header = T)
+
+ids <- rownames(enrich_methy_c1)
+length(ids)
+
+go_2_reac[go_2_reac$GO_Term == rownames(enrich_methy_c2), "Identifier"]
+go_2_reac
+```
+
+```{r}
+enrich_methy_c1$TERM[1:15]
+enrich_methy_c1_prom$TERM[1:15]
+```
+
+
+mRNA
+```{r}
+a <- plot(model_sgcca2, block = 3, comp = 1, type = "weights", n_mark = 30)
+b <- plot(model_sgcca2, block = 3, comp = 2, type = "weights", n_mark = 30)
+c <- plot(model_sgcca2, block = 3, comp = 3, type = "weights", n_mark = 30)
+```
+
+```{r}
+mrna_sel_c1_top30 <- as.vector(a$data$y)
+mrna_sel_c2_top30 <- as.vector(b$data$y)
+mrna_sel_c3_top30 <- as.vector(c$data$y)
+  
+mrna_sel_c1_ <- names(which(model_sgcca2$a$mRNA[,1] != 0))
+mrna_sel_c2_ <- names(which(model_sgcca2$a$mRNA[,2] != 0))
+mrna_sel_c3_ <- names(which(model_sgcca2$a$mRNA[,3] != 0))
+```
+
+```{r}
+
+length(intersect(mrna_sel_f3, mrna_sel_c3))
+```
+
+
+
+```{r}
+mrna_sel_c1 <- info.mrna[mrna_sel_c1_, "gene_name"]
+mrna_sel_c1 <- as.matrix(mrna_sel_c1)
+rownames(mrna_sel_c1) <- as.matrix(mrna_sel_c1_) 
+
+mrna_sel_c2 <- info.mrna[mrna_sel_c2_, "gene_name"]
+mrna_sel_c2 <- as.matrix(mrna_sel_c2)
+rownames(mrna_sel_c2) <- as.matrix(mrna_sel_c2_) 
+
+mrna_sel_c3 <- info.mrna[mrna_sel_c3_, "gene_name"]
+mrna_sel_c3 <- as.matrix(mrna_sel_c3)
+rownames(mrna_sel_c3) <- as.matrix(mrna_sel_c3_) 
+```
+
+```{r}
+length(intersect(mrna_sel_c1, mrna_sel_f1)) # 30
+length(intersect(mrna_sel_c3, mrna_sel_f2)) # 30
+length(intersect(mrna_sel_c2, mrna_sel_f3)) # 29 
+```
+
+
+
+
+mIRNA
+```{r}
+a <- plot(model_sgcca2, block = 4, comp = 1, type = "weights", n_mark = 30)
+```
+
+
+
+```{r}
+mirna_sel_c1_top30 <- as.vector(a$data$y)
+mirna_sel_c1_ <- names(which(model_sgcca2$a$miRNA[,1] != 0))
+```
+
+```{r}
+mirna_sel_c1 <- info.mirna[mirna_sel_c1_, "gene_name"]
+mirna_sel_c1 <- as.matrix(mirna_sel_c1)
+rownames(mirna_sel_c1) <- as.matrix(mirna_sel_c1_) 
+```
+
+```{r}
+length(intersect(mirna_sel_c1, mirna_sel_f1))
+```
+
+# Enrichment Analysis
+GSEA does not make sense here... 
+
+```{r}
+write.csv(colnames(omics.list$mRNA),"results/mrna_all.csv", row.names = FALSE)
+
+write.csv(rownames(mrna_sel_c1),"results/mrna_c1.csv", row.names = FALSE)
+write.csv(rownames(mrna_sel_c2),"results/mrna_c2.csv", row.names = FALSE)
+write.csv(rownames(mrna_sel_c3),"results/mrna_c3.csv", row.names = FALSE)
+```
+
+
+
+```{r}
+
+enrich_mrna_c2 <- read.csv("results/enrichment_mrna_c2.csv", header = T)
+enrich_mrna_c2 <- enrich_mrna_c2 %>%
+  separate(Pathway, into = c("Pathway_ID", "Pathway_Name"), sep = " ", extra = "merge")
+
+
+
+
+a <- read_file("results/enrichment_mrna_c1.csv")
+b <- read_file("results/enrichment_mrna_c2.csv")
+c <- read_file("results/enrichment_mrna_c3.csv")
+
+
+# plot_ora(a, max.pathways = 10, filename = "mrna_c2_top_10") only one 
+plot_ora(b, max.pathways = 10, filename = "mrna_c2_top_10")
+plot_ora(c, max.pathways = 10, filename = "mrna_c3_top_10")
+
+
+plot_categories_reactome(list("Component 2" = b$Pathway_ID,
+                              "Component 3" = c$Pathway_ID),
+                         filename = "mrna_components")
+```
+
+pathways of componetn 2, in "Disease"
+```{r}
+pathways <- b$Pathway_ID
+
+
+sig_pathways_ids <- pathways
+top_names <- character(length(sig_pathways_ids))
+
+for (j in seq_along(sig_pathways_ids)) {
+  id <- sig_pathways_ids[j]
+  
+
+  if (id %in% reactome_pathway_hierarchy$top_level_pathway) {
+    top_id <- id
+  } else {
+    top_id <- reactome_pathway_hierarchy$top_level_pathway[match(id, reactome_pathway_hierarchy$pathway)]
+    
+
+    if (is.na(top_id) || length(top_id) == 0) {
+      tryCatch({
+        top_id <- getPathways(id, top.level = TRUE)$stId[1]
+      }, error = function(e) {
+        message(paste("ID not found in file or API:", id))
+        top_id <- NA
+      })
+    }
+  }
+  
+
+  if (!is.na(top_id)) {
+    top_name <- legend_reactome_feature_set$Pathway_name[legend_reactome_feature_set$Pathway_id == top_id]
+    top_names[j] <- ifelse(length(top_name) > 0, top_name, NA)
+  } else {
+    top_names[j] <- NA
+  }
+}
+
+length(top_names)
+length(pathways)
+
+
+paths_disease <- pathways[top_names == "Disease"]
+length(paths_disease)
+
+
+for (id in paths_disease){
+
+  print(query(id = id)[["disease"]])
+}
+
+```
+
+
+# Validation
+
+Component 1 - GBMvsLGG
+```{r}
+methy_ASTROvsOLIGO <- read.csv("../DGEresults/methy_ASTROvsOLIGO.csv", row.names = 1)
+methy_GBMvsLGG <- read.csv("../DGEresults/methy_GBMvsLGG.csv", row.names = 1)
+
+mrna_ASTROvsOLIGO <- read.csv("../DGEresults/mrna_ASTROvsOLIGO.csv", row.names = 1)
+
+mrna_ASTROvsOLIGO$diffexpressed <- "NO"
+mrna_ASTROvsOLIGO$diffexpressed[mrna_ASTROvsOLIGO$logFC > 1 & mrna_ASTROvsOLIGO$PValue < 0.05] <- "UP"
+mrna_ASTROvsOLIGO$diffexpressed[mrna_ASTROvsOLIGO$logFC < -1 & mrna_ASTROvsOLIGO$PValue < 0.05] <- "DOWN"
+
+mrna_GBMvsLGG <- read.csv("../DGEresults/mrna_GBMvsLGG.csv", row.names = 1)
+mrna_GBMvsLGG$diffexpressed[mrna_GBMvsLGG$logFC > 1 & mrna_GBMvsLGG$PValue < 0.05] <- "UP"
+mrna_GBMvsLGG$diffexpressed[mrna_GBMvsLGG$logFC < -1 & mrna_GBMvsLGG$PValue < 0.05] <- "DOWN"
+```
+
+```{r}
+mrna_GBMvsLGG[mrna_sel_c1_,] # except one c, but logFC is 0.98
+mrna_ASTROvsOLIGO[mrna_sel_c2_,] # all
+
+
+methy_GBMvsLGG[methy_sel_c1, ] # all UP-regulated
+methy_ASTROvsOLIGO[methy_sel_c2,] # not all
+table(methy_ASTROvsOLIGO[methy_sel_c2,"diffexpressed"])
+```
+
+
+
+What about the correlation of the CpGs, mRNA and miRNA selected?
+
+All
+
+```{r}
+conc_matrix <- cbind(omics.list$Methylation, omics.list$mRNA)
+conc_matrix <- cbind(conc_matrix, omics.list$miRNA)
+
+comp1_features <- c(methy_sel_c1,mrna_sel_c1_, mirna_sel_c1_ )
+comp2_features <- c(methy_sel_c2, mrna_sel_c2_ )
+comp3_features <- mrna_sel_c3_
+
+conc_matrix <- conc_matrix[,c(comp1_features,comp2_features,comp3_features  )]
+
+
+
+
+library(ComplexHeatmap)
+library(circlize)
+
+# Compute correlation matrix
+correlation_matrix <- cor(conc_matrix, method = "pearson", use = "na.or.complete")
+
+# Annotation for rows and columns
+annotation_df <- data.frame(
+  Omics_Component = c(
+    rep("CpGs_C1", length(methy_sel_c1)),
+    rep("mRNA_C1", length(mrna_sel_c1_)),
+    rep("miRNA_C1", length(mirna_sel_c1_)),
+    rep("CpGs_C2", length(methy_sel_c2)),
+    rep("mRNA_C2", length(mrna_sel_c2_)),
+     rep("mRNA_C3", length(mrna_sel_c3_))
+  )
+)
+rownames(annotation_df) <- rownames(correlation_matrix)
+
+# Annotation colors
+annotation_colors <- list(
+  Omics_Component = c(
+    "CpGs_C1"  = "#ca0020",  
+    "mRNA_C1"  = "#1b7837", 
+    "miRNA_C1" = "#fdb863",  
+    "CpGs_C2"  = "#0571b0",  
+    "mRNA_C2"  = "#7b3294", 
+    "mRNA_C3" = "#38b6b2"
+  )
+)
+
+# Row and column annotations (same for both in this case)
+row_ha <- rowAnnotation(
+  df = annotation_df,
+  col = annotation_colors,
+  annotation_name_gp = gpar(fontsize = 20),
+  annotation_legend_param = list(
+    title_gp = gpar(fontsize = 20),
+    labels_gp = gpar(fontsize = 20)
+  )
+)
+
+
+
+
+col_fun <- colorRamp2(c(-1, 0, 1), c("#268989", "white", "#E43F3F"))
+
+# Generate heatmap object
+ht <- Heatmap(
+  correlation_matrix,
+  name = "Pearson Correlation",
+  col = col_fun,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_row_names = FALSE,
+  show_column_names = FALSE,
+  left_annotation = row_ha,
+  heatmap_legend_param = list(
+    title = NULL,
+    title_gp = gpar(fontsize = 0),
+    labels_gp = gpar(fontsize = 20),
+    legend_height = unit(65, "cm")  # Resize legend bar
+  )
+)
+
+# Save to PDF
+pdf("results/feature_correlation_heatmapall.pdf", width = 30, height = 30)
+draw(ht, heatmap_legend_side = "right", annotation_legend_side = "left")
+dev.off()
+
+```
+
+
+# Heatmap
+
+
+
+```{r}
+heatmap <- matrix(data = NA, 
+                 nrow = length(c(mrna_sel_c1_pos, mrna_sel_c1_neg, mrna_sel_c2_pos, mrna_sel_c2_neg, 
+                                 mirna_sel_c1_pos, mirna_sel_c1_neg, 
+                                 methy_sel_c1_pos, methy_sel_c1_neg, methy_sel_c2_pos, methy_sel_c2_neg)), 
+                 ncol = length(group1) + length(group2))
+
+rownames(heatmap) <- c(names(mrna_sel_c1_pos), names(mrna_sel_c1_neg), names(mrna_sel_c2_pos), names(mrna_sel_c2_neg),
+                       names(mirna_sel_c1_pos) , names(mirna_sel_c1_neg), 
+                       names(methy_sel_c1_pos), names(methy_sel_c1_neg), names(methy_sel_c2_pos), names(methy_sel_c2_neg))
+colnames(heatmap) <- c(group1, group2)
+
+
+for (row in 1:nrow(heatmap)){
+  
+  if (rownames(heatmap)[row] %in% colnames(omics.list1$mRNA)){
+    for (col in 1: ncol(heatmap)){
+      heatmap[row, col] <- omics.list1$mRNA[colnames(heatmap)[col], rownames(heatmap)[row]]
+    }
+
+  }
+  else if (rownames(heatmap)[row] %in% colnames(omics.list1$miRNA)){
+    for (col in 1:ncol(heatmap)){
+      heatmap[row, col] <- omics.list1$miRNA[colnames(heatmap)[col], rownames(heatmap)[row]]
+    }
+  
+  }
+  else{
+    for (col in 1:ncol(heatmap)){
+      heatmap[row, col] <- omics.list1$DNAMethylation[colnames(heatmap)[col], rownames(heatmap)[row]]
+    }
+    
+  }
+}
+
+rownames(heatmap) <- c(unname(mrna_sel_c1_pos), 
+                                    unname(mrna_sel_c1_neg), 
+                                    unname(mrna_sel_c2_pos), 
+                                    unname(mrna_sel_c2_neg), 
+                                   unname(mirna_sel_c1_pos),
+                                    unname(mirna_sel_c1_neg), 
+                                    names(methy_sel_c1_pos), 
+                                    names(methy_sel_c1_neg),
+                                   names(methy_sel_c2_pos),
+                                   names(methy_sel_c2_neg))
+
+
+
+ 
+annotation_row1 <- c(rep("c1+", length(mrna_sel_c1_pos)),
+                     rep("c1-", length(mrna_sel_c1_neg)),
+                     rep("c2+", length(mrna_sel_c2_pos)),
+                      rep("c2-", length(mrna_sel_c2_neg)),
+                     rep("c1+", length(mirna_sel_c1_pos)),
+                     rep("c1-", length(mirna_sel_c1_neg)),
+                     rep("c1+", length(methy_sel_c1_pos)),
+                     rep("c1-", length(methy_sel_c1_neg)),
+                     rep("c2+", length(methy_sel_c2_pos)),
+                     rep("c2-", length(methy_sel_c2_neg))
+                     )
+
+annotation_col1 <- c(rep("PTEN/EGFR", length(group1)),
+                      rep("IDH1", length(group2)))
+
+annotation_col2 <- c(rep("None", length(group1)),
+                     rep("TP53/ATRX", length(group2a)),
+                     rep("CIC/NOTCH1/FUBP1", length(group2b)),
+                     rep("TP53/ATRXandCIC/NOTCH1/FUBP1", length(group2c)))
+
+annotation_col <- data.frame(annotation_col1, annotation_col2)
+rownames(annotation_col) <- colnames(heatmap)
+ 
+
+annotation_row <- data.frame(annotation_row1)
+rownames(annotation_row) <- rownames(heatmap)
+
+
+annotation_colors <- list(annotation_col1 =  c("IDH1" = "black", "PTEN/EGFR" = "green"),
+                          annotation_col2 = c("TP53/ATRX" = "blue","CIC/NOTCH1/FUBP1" = "red", "None" = "green","TP53/ATRXandCIC/NOTCH1/FUBP1"= "pink"),
+                          annotation_row1 = c("c1+" = "maroon1", "c1-" = "green", "c2+" = "indianred", "c2-" = "yellow"))
+
+pheatmap(heatmap,
+  cluster_rows = T,         
+  cluster_cols = TRUE,         
+  show_rownames = TRUE,       
+  show_colnames = FALSE,   
+  annotation_col = annotation_col,
+  annotation_row = annotation_row,
+  annotation_colors = annotation_colors, 
+  filename = "results/heatmap.png",  
+  width = 20,                 
+  height = 20                   
+)
+```
+
+
+
+Group1, with PTEN or EFGR:
+ - have a very low methyltation on methy_sel_c1_pos,  mrna_sel_c1_pos, mirna_sel_c1_pos
+```{r}
+table(methy_sel_c1_pos)
+mrna_sel_c1_pos
+mirna_sel_c1_pos
+```
+
+Group2, with IDH1
+  - have a very low expression on mrna_sel_c1_neg, mirna_sel_c1_neg no tthat much
+```{r}
+mrna_sel_c1_neg
+```
+
+ 
+ 
+Group 2a (atrx e tp53)
+  - low expresion methy_sel_c2_pos
+```{r}
+table(methy_sel_c2_pos)
+```
+ 
+ 
+Group 2b:
+  - loe expression on mrna_sel_c2_neg (a subgrouo of 2a has also low expression on this)
+```{r}
+mrna_sel_c2_neg
+```
+
+
+
+# Venn Diagrams - Survival Signficance 
+mRNA and methylation 
+
+```{r}
+mRNA_all <- as.matrix(read.csv("../DataSets/processed_assays/assay_rna_coding.csv", row.names = 1))
+dna_all <- as.matrix(read.csv("../DataSets/processed_assays/assay_methylation.csv", row.names = 1))
+
+classification <- as.matrix(read.csv("../DataSets/SIMPLIFIED_CLASSIFICATION_TCGA_2016_2021.csv", row.names = 1))
+survival.complete <- as.matrix(read.csv("../DataSets/processed_assays/survival_complete.csv", row.names = 1))
+
+
+classification <- classification[,"classification.2021"]
+classification <- ifelse(classification == "glioblastoma", "GBM", 
+  ifelse(classification  == "astrocytoma", "ASTRO",
+  ifelse(classification  == "oligodendroglioma", "OLIGO",
+      NA)))
+
+
+mRNA_all <- mRNA_all[intersect(rownames(mRNA_all), intersect(rownames(survival.complete), names(classification))), ] # 652
+dna_all <- dna_all[intersect(rownames(dna_all), intersect(rownames(survival.complete), names(classification))), ]
+
+survival.complete <- survival.complete[rownames(mRNA_all), ]
+classification <- classification[rownames(mRNA_all)]
+survival.complete <- as.data.frame(survival.complete)
+
+survival.complete_dna <- survival.complete[rownames(dna_all), ]
+classification_dna <- classification[rownames(dna_all)]
+
+survival.complete_dna <- as.data.frame(survival.complete_dna)
+```
+
+
+```{r}
+results_surv_mrna <- list(Comp1 = mrna_sel_c1_, Comp2 = mrna_sel_c2_, Comp3 = mrna_sel_c3_, 
+                          Significant = c())
+results_surv_dna <- list(Comp1 = methy_sel_c1, Comp2 = methy_sel_c2, 
+                         Significant = c())
+
+data_dna <- survival.complete_dna
+data_mrna <- survival.complete
+
+for (gene_sel in unique(c(mrna_sel_c1_, mrna_sel_c2_, mrna_sel_c3_))){
+  
+  median <- median(mRNA_all[,gene_sel], na.rm = TRUE)
+  data_mrna$gene_group <- ifelse(mRNA_all[,gene_sel] >= median, "High", "Low")
+  
+  surv_obj <- Surv(time = data_mrna$Time, event = data_mrna$Status)
+
+  km_fit <- survfit(surv_obj ~ gene_group, data = data_mrna)
+  
+  log_rank_test <- survdiff(surv_obj ~ gene_group, data = data_mrna)
+  p_value <- log_rank_test$pvalue 
+
+  if (p_value <= 0.05){
+    results_surv_mrna$Significant <- c(results_surv_mrna$Significant, gene_sel)
+  }
+}
+
+for (dna_sel in unique(c(methy_sel_c1, methy_sel_c2))){
+  
+  median <- median(dna_all[,dna_sel], na.rm = TRUE)
+  data_dna$gene_group <- ifelse(dna_all[,dna_sel] >= median, "High", "Low")
+  
+  surv_obj <- Surv(time = data_dna$Time, event = data_dna$Status)
+
+  km_fit <- survfit(surv_obj ~ gene_group, data = data_dna)
+  
+  log_rank_test <- survdiff(surv_obj ~ gene_group, data = data_dna)
+  p_value <- log_rank_test$pvalue 
+
+  if (p_value <= 0.05){
+    results_surv_dna$Significant <- c(results_surv_dna$Significant, dna_sel)
+  }
+}
+```
+
+
+```{r}
+library("ggvenn")
+library("RColorBrewer")
+
+myCol <- brewer.pal(4, "Dark2")
+
+names(results_surv_dna) <- c("Component 1","Component 2", "Survival Significant")
+names(results_surv_mrna) <- c("Component 1", "Component 2", "Component 3", "Survival Significant")
+
+p1 <- ggvenn(results_surv_dna,
+       show_percentage = F,
+       text_size = 6, fill_color = myCol[1:3])
+
+
+
+
+p2 <- ggvenn(results_surv_mrna,
+       show_percentage = F,
+       text_size = 6, fill_color = myCol[1:4],
+       show_outside = "always") +
+      coord_cartesian(clip = "off") +
+      theme(plot.margin = margin(80, 80, 80, 80)) 
+
+
+
+
+  
+ggsave("results/venn_plot_dnna.pdf", plot = p1, width = 10, height = 7, dpi = 300)
+ggsave("results/venn_plot_mrna.pdf", plot = p2, width = 10, height = 7, dpi = 300)
+```
+
+
