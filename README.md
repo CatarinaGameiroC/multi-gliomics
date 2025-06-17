@@ -15,7 +15,8 @@ This repository contains code for analyzing glioma heterogeneity using two spars
 
 
 ## Notes
-- This project is part of a Master’s thesis.
+- This project is part of a Master’s thesis, supervised by Prof./Dr. Alexandra Sofia Martins de Carvalho and Prof./Dr. Susana de Almeida Mendes Vinga Martins.
+- The dissertation document and the respective extended abstarct can be consulted in [here](https://fenix.tecnico.ulisboa.pt/cursos/mecd/dissertacao/1972678479056529). 
 
 
 
